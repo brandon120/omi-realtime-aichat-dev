@@ -84,30 +84,84 @@ async function initializeMemoryStorage() {
     
     chromaClient = new ChromaClient(clientConfig);
     
-    // Create or get the memories collection
-    // First, try to delete the existing collection if it exists (to ensure clean state)
-    try {
-      await chromaClient.deleteCollection({ name: "omi_memories" });
-      console.log('🗑️ Deleted existing collection to ensure clean state');
-    } catch (error) {
-      // Collection doesn't exist, that's fine
-      console.log('📚 No existing collection to delete');
-    }
-    
-    // Create new collection with OpenAI embedding function
+    // Create or get the memories collection with intelligent migration
     const { OpenAIEmbeddingFunction } = require('chromadb');
     
     const embeddingFunction = new OpenAIEmbeddingFunction({
       openai_api_key: process.env.OPENAI_KEY
     });
     
-    memoriesCollection = await chromaClient.createCollection({
-      name: "omi_memories",
-      metadata: { description: "Omi AI Chat Plugin Memory Storage" },
-      embeddingFunction: embeddingFunction
-    });
-    
-    console.log('📚 Created new collection with OpenAI embedding function');
+    try {
+      // Try to get existing collection first
+      memoriesCollection = await chromaClient.getCollection({
+        name: "omi_memories"
+      });
+      
+      // Test if the collection works with embedding function by trying a simple query
+      try {
+        await memoriesCollection.query({
+          queryTexts: ["test"],
+          nResults: 1
+        });
+        console.log('📚 Using existing collection with embedding function');
+      } catch (queryError) {
+        if (queryError.message.includes('Bad request') || queryError.message.includes('400')) {
+          console.log('🔄 Collection exists but needs embedding function, migrating...');
+          // Get existing data before deleting
+          let existingData = [];
+          try {
+            const existingMemories = await memoriesCollection.get();
+            existingData = existingMemories.metadatas || [];
+            console.log(`📦 Found ${existingData.length} existing memories to migrate`);
+          } catch (getError) {
+            console.log('⚠️ Could not retrieve existing data, will start fresh');
+          }
+          
+          // Delete and recreate collection with embedding function
+          await chromaClient.deleteCollection({ name: "omi_memories" });
+          memoriesCollection = await chromaClient.createCollection({
+            name: "omi_memories",
+            metadata: { description: "Omi AI Chat Plugin Memory Storage" },
+            embeddingFunction: embeddingFunction
+          });
+          
+          // Restore existing data if any
+          if (existingData.length > 0) {
+            console.log('🔄 Restoring existing memories...');
+            const ids = existingData.map((_, index) => `migrated-${Date.now()}-${index}`);
+            const documents = existingData.map(data => data.content || '');
+            const metadatas = existingData.map(data => ({
+              ...data,
+              migrated: true,
+              originalId: data.id
+            }));
+            
+            await memoriesCollection.add({
+              ids: ids,
+              documents: documents,
+              metadatas: metadatas
+            });
+            console.log(`✅ Restored ${existingData.length} memories`);
+          }
+          
+          console.log('📚 Collection migrated with OpenAI embedding function');
+        } else {
+          throw queryError;
+        }
+      }
+    } catch (error) {
+      if (error.message.includes('not found')) {
+        // Collection doesn't exist, create it with embedding function
+        memoriesCollection = await chromaClient.createCollection({
+          name: "omi_memories",
+          metadata: { description: "Omi AI Chat Plugin Memory Storage" },
+          embeddingFunction: embeddingFunction
+        });
+        console.log('📚 Created new collection with OpenAI embedding function');
+      } else {
+        throw error;
+      }
+    }
     
     console.log('✅ Memory storage initialized with ChromaDB');
     console.log('📊 Collection name: omi_memories');
@@ -842,17 +896,22 @@ app.post('/omi-webhook', async (req, res) => {
     }
     
     // Check for duplicate content to prevent processing the same transcript multiple times
-    const contentHash = Buffer.from(fullTranscript).toString('base64');
-    if (processedContent.has(session_id) && processedContent.get(session_id).includes(contentHash)) {
-      console.log('⏭️ Skipping duplicate transcript content:', fullTranscript);
-      return res.status(200).json({ message: 'Content already processed' });
-    }
+    // But allow commands to be processed even if repeated
+    const isAnyCommand = isMemoryCommand || isNotesCommand || isTodoCommand || isContextCommand || isAskingForHelp;
     
-    // Track this content as processed
-    if (!processedContent.has(session_id)) {
-      processedContent.set(session_id, []);
+    if (!isAnyCommand) {
+      const contentHash = Buffer.from(fullTranscript).toString('base64');
+      if (processedContent.has(session_id) && processedContent.get(session_id).includes(contentHash)) {
+        console.log('⏭️ Skipping duplicate transcript content:', fullTranscript);
+        return res.status(200).json({ message: 'Content already processed' });
+      }
+      
+      // Track this content as processed
+      if (!processedContent.has(session_id)) {
+        processedContent.set(session_id, []);
+      }
+      processedContent.get(session_id).push(contentHash);
     }
-    processedContent.get(session_id).push(contentHash);
     
     // Determine if user wants AI interaction
     const wantsAIInteraction = hasHeyOmi || (isQuestion && isCommand) || (isConversational && isCommand);
@@ -1165,6 +1224,7 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
      
      // Use OpenAI Responses API with built-in web search
      console.log('🤖 Using OpenAI Responses API with web search for:', question);
+     const startTime = Date.now();
      
      let aiResponse = '';
      
@@ -1172,12 +1232,25 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
          // Get conversation history for this session
          const history = getConversationHistory(session_id);
          
-         // Search for relevant memories (with error handling)
+         // Search for relevant memories only for questions that might benefit from context
          let relevantMemories = [];
-         try {
+         const needsMemoryContext = question.toLowerCase().includes('remember') || 
+                                   question.toLowerCase().includes('what did') ||
+                                   question.toLowerCase().includes('tell me about') ||
+                                   question.toLowerCase().includes('do you know') ||
+                                   question.toLowerCase().includes('my') ||
+                                   question.toLowerCase().includes('i') ||
+                                   history.length > 3; // Only search if there's substantial conversation history
+         
+         if (needsMemoryContext) {
+           try {
              relevantMemories = await searchMemories(session_id, question, 3);
-         } catch (memoryError) {
+             console.log('🧠 Memory search completed, found:', relevantMemories.length, 'memories');
+           } catch (memoryError) {
              console.warn('⚠️ Memory search failed, continuing without memories:', memoryError.message);
+           }
+         } else {
+           console.log('⚡ Skipping memory search for simple question');
          }
          
          // Create context-aware input for the Responses API
@@ -1217,7 +1290,8 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
          });
          
          aiResponse = response.output_text;
-         console.log('✨ OpenAI Responses API response:', aiResponse);
+         const responseTime = Date.now() - startTime;
+         console.log(`✨ OpenAI Responses API response (${responseTime}ms):`, aiResponse);
          
          // Log additional response data for debugging
          if (response.tool_use && response.tool_use.length > 0) {
@@ -1229,15 +1303,29 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
          
          // Fallback to regular chat completion if Responses API fails
          try {
+             console.log('🔄 Falling back to regular OpenAI chat completion');
+             const fallbackStartTime = Date.now();
+             
              // Get conversation history for fallback
              const history = getConversationHistory(session_id);
              
-             // Search for relevant memories (with error handling)
+             // Search for relevant memories only if needed (same logic as main path)
              let relevantMemories = [];
-             try {
+             const needsMemoryContext = question.toLowerCase().includes('remember') || 
+                                       question.toLowerCase().includes('what did') ||
+                                       question.toLowerCase().includes('tell me about') ||
+                                       question.toLowerCase().includes('do you know') ||
+                                       question.toLowerCase().includes('my') ||
+                                       question.toLowerCase().includes('i') ||
+                                       history.length > 3;
+             
+             if (needsMemoryContext) {
+               try {
                  relevantMemories = await searchMemories(session_id, question, 3);
-             } catch (memoryError) {
+                 console.log('🧠 Fallback memory search completed, found:', relevantMemories.length, 'memories');
+               } catch (memoryError) {
                  console.warn('⚠️ Memory search failed, continuing without memories:', memoryError.message);
+               }
              }
              
              // Build messages array with conversation history
@@ -1278,7 +1366,8 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
                  temperature: 0.7,
              });
              aiResponse = openaiResponse.choices[0].message.content;
-             console.log('✨ Fallback OpenAI response:', aiResponse);
+             const fallbackResponseTime = Date.now() - fallbackStartTime;
+             console.log(`✨ Fallback OpenAI response (${fallbackResponseTime}ms):`, aiResponse);
          } catch (fallbackError) {
              console.error('❌ Fallback also failed:', fallbackError);
              aiResponse = "I'm sorry, I'm experiencing technical difficulties. Please try again later.";
