@@ -444,6 +444,95 @@ async function deleteMemory(memoryId) {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Debug endpoint for environment variables
+app.get('/debug', (req, res) => {
+  res.status(200).json({
+    environment: {
+      chroma_url: process.env.CHROMA_URL || 'NOT_SET',
+      chroma_auth_token: process.env.CHROMA_AUTH_TOKEN ? 'SET' : 'NOT_SET',
+      openai_key: process.env.OPENAI_KEY ? 'SET' : 'NOT_SET',
+      omi_app_id: process.env.OMI_APP_ID ? 'SET' : 'NOT_SET',
+      omi_app_secret: process.env.OMI_APP_SECRET ? 'SET' : 'NOT_SET'
+    },
+    memory_status: {
+      chroma_client: chromaClient ? 'initialized' : 'not_initialized',
+      memories_collection: memoriesCollection ? 'ready' : 'not_ready',
+      memory_storage_size: memoryStorage.size
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Test ChromaDB connection endpoint
+app.get('/test-chromadb', async (req, res) => {
+  try {
+    const chromaUrl = process.env.CHROMA_URL || 'https://chroma-yfcv-production.up.railway.app';
+    const authToken = process.env.CHROMA_AUTH_TOKEN;
+    
+    console.log('🧪 Testing ChromaDB connection from /test-chromadb endpoint');
+    console.log('URL:', chromaUrl);
+    console.log('Auth Token:', authToken ? 'Present' : 'Missing');
+    
+    // Test heartbeat
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    
+    const headers = {};
+    if (authToken) {
+      headers['Authorization'] = `Bearer ${authToken}`;
+    }
+    
+    const response = await fetch(`${chromaUrl}/api/v1/heartbeat`, {
+      signal: controller.signal,
+      headers: headers
+    });
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      throw new Error(`ChromaDB heartbeat failed: ${response.status} ${response.statusText}`);
+    }
+    
+    const responseText = await response.text();
+    console.log('✅ Heartbeat successful:', responseText);
+    
+    // Test client creation
+    const clientConfig = { path: chromaUrl };
+    if (authToken) {
+      clientConfig.auth = {
+        provider: 'token',
+        credentials: authToken
+      };
+    }
+    
+    const testClient = new ChromaClient(clientConfig);
+    const testCollection = await testClient.getOrCreateCollection({
+      name: "test_connection",
+      metadata: { test: true }
+    });
+    
+    console.log('✅ ChromaDB test successful');
+    
+    res.status(200).json({
+      status: 'success',
+      message: 'ChromaDB connection test passed',
+      heartbeat_response: responseText,
+      collection_name: testCollection.name,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('❌ ChromaDB test failed:', error);
+    
+    res.status(500).json({
+      status: 'error',
+      message: 'ChromaDB connection test failed',
+      error: error.message,
+      error_type: error.constructor.name,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ 
