@@ -84,7 +84,7 @@ async function initializeMemoryStorage() {
     
     chromaClient = new ChromaClient(clientConfig);
     
-    // Create or get the memories collection
+    // Create or get the memories collection with embedding function
     memoriesCollection = await chromaClient.getOrCreateCollection({
       name: "omi_memories",
       metadata: { description: "Omi AI Chat Plugin Memory Storage" }
@@ -286,24 +286,6 @@ function clearConversationHistory(sessionId) {
     console.log(`🧹 Cleared conversation history for session: ${sessionId}`);
 }
 
-/**
- * Generates embeddings for text using OpenAI
- * @param {string} text - The text to embed
- * @returns {Promise<number[]>} The embedding vector
- */
-async function generateEmbedding(text) {
-    try {
-        const openaiClient = getOpenAIClient();
-        const response = await openaiClient.embeddings.create({
-            model: "text-embedding-3-small",
-            input: text
-        });
-        return response.data[0].embedding;
-    } catch (error) {
-        console.error('❌ Error generating embedding:', error);
-        throw error;
-    }
-}
 
 /**
  * Saves a memory to the vector store
@@ -320,7 +302,6 @@ async function saveMemory(userId, content, category = 'general', metadata = {}) 
 
     try {
         const memoryId = uuidv4();
-        const embedding = await generateEmbedding(content);
         
         const memoryData = {
             id: memoryId,
@@ -334,10 +315,9 @@ async function saveMemory(userId, content, category = 'general', metadata = {}) 
             }
         };
 
-        // Store in ChromaDB
+        // Store in ChromaDB (let ChromaDB handle embedding generation)
         await memoriesCollection.add({
             ids: [memoryId],
-            embeddings: [embedding],
             documents: [content],
             metadatas: [memoryData]
         });
@@ -369,14 +349,14 @@ async function searchMemories(userId, query, limit = 5) {
     }
 
     try {
-        const queryEmbedding = await generateEmbedding(query);
-        
+        // Use queryTexts instead of queryEmbeddings for semantic search
         const results = await memoriesCollection.query({
-            queryEmbeddings: [queryEmbedding],
+            queryTexts: [query],
             nResults: limit,
             where: { userId: userId }
         });
 
+        // Return the metadatas from the results
         return results.metadatas[0] || [];
     } catch (error) {
         console.error('❌ Error searching memories:', error);
