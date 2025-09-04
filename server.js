@@ -86,8 +86,16 @@ async function initializeMemoryStorage() {
     
     // Create or get the memories collection with intelligent migration
     // Use default embedding function from chromadb-default-embed
-    const { DefaultEmbeddingFunction } = require('chromadb-default-embed');
-    const embeddingFunction = new DefaultEmbeddingFunction();
+    let embeddingFunction;
+    try {
+      const { DefaultEmbeddingFunction } = require('chromadb-default-embed');
+      embeddingFunction = new DefaultEmbeddingFunction();
+      console.log('✅ Using DefaultEmbeddingFunction from chromadb-default-embed');
+    } catch (error) {
+      console.warn('⚠️ Failed to load DefaultEmbeddingFunction:', error.message);
+      console.log('📝 Note: This requires a valid OPENAI_KEY environment variable');
+      embeddingFunction = null;
+    }
     
     try {
       // Try to get existing collection first
@@ -117,11 +125,14 @@ async function initializeMemoryStorage() {
           
           // Delete and recreate collection with embedding function
           await chromaClient.deleteCollection({ name: "omi_memories" });
-          memoriesCollection = await chromaClient.createCollection({
+          const collectionConfig = {
             name: "omi_memories",
-            metadata: { description: "Omi AI Chat Plugin Memory Storage" },
-            embeddingFunction: embeddingFunction
-          });
+            metadata: { description: "Omi AI Chat Plugin Memory Storage" }
+          };
+          if (embeddingFunction) {
+            collectionConfig.embeddingFunction = embeddingFunction;
+          }
+          memoriesCollection = await chromaClient.createCollection(collectionConfig);
           
           // Restore existing data if any
           if (existingData.length > 0) {
@@ -150,11 +161,14 @@ async function initializeMemoryStorage() {
     } catch (error) {
       if (error.message.includes('not found')) {
         // Collection doesn't exist, create it with embedding function
-        memoriesCollection = await chromaClient.createCollection({
-          name: "omi_memories",
-          metadata: { description: "Omi AI Chat Plugin Memory Storage" },
-          embeddingFunction: embeddingFunction
-        });
+                  const collectionConfig = {
+            name: "omi_memories",
+            metadata: { description: "Omi AI Chat Plugin Memory Storage" }
+          };
+          if (embeddingFunction) {
+            collectionConfig.embeddingFunction = embeddingFunction;
+          }
+          memoriesCollection = await chromaClient.createCollection(collectionConfig);
         console.log('📚 Created new collection with OpenAI embedding function');
       } else {
         throw error;

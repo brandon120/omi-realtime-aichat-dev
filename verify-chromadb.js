@@ -50,7 +50,17 @@ async function verifyChromaDB() {
     }
     
     // Create or get the collection with intelligent migration
-    // Try without embedding function first
+    // Use default embedding function from chromadb-default-embed
+    let embeddingFunction;
+    try {
+      const { DefaultEmbeddingFunction } = require('chromadb-default-embed');
+      embeddingFunction = new DefaultEmbeddingFunction();
+      console.log('✅ Using DefaultEmbeddingFunction from chromadb-default-embed');
+    } catch (error) {
+      console.warn('⚠️ Failed to load DefaultEmbeddingFunction:', error.message);
+      console.log('📝 Note: This requires a valid OPENAI_KEY environment variable');
+      embeddingFunction = null;
+    }
     
     let collection;
     try {
@@ -67,9 +77,50 @@ async function verifyChromaDB() {
         });
         console.log('📚 Using existing collection with embedding function');
       } catch (queryError) {
-        if (queryError.message.includes('Bad request') || queryError.message.includes('400')) {
-          console.log('🔄 Collection needs migration, but skipping for verification test');
-          console.log('⚠️ In production, this would migrate the collection with data preservation');
+        if (queryError.message.includes('Bad request') || queryError.message.includes('400') || queryError.message.includes('generate')) {
+          console.log('🔄 Collection needs migration, performing migration...');
+          
+          // Get existing data before deleting
+          let existingData = [];
+          try {
+            const existingMemories = await collection.get();
+            existingData = existingMemories.metadatas || [];
+            console.log(`📦 Found ${existingData.length} existing memories to migrate`);
+          } catch (getError) {
+            console.log('⚠️ Could not retrieve existing data, will start fresh');
+          }
+          
+          // Delete and recreate collection with embedding function
+          await chromaClient.deleteCollection({ name: "omi_memories" });
+          const collectionConfig = {
+            name: "omi_memories",
+            metadata: { description: "Omi AI Chat Plugin Memory Storage" }
+          };
+          if (embeddingFunction) {
+            collectionConfig.embeddingFunction = embeddingFunction;
+          }
+          collection = await chromaClient.createCollection(collectionConfig);
+          
+          // Restore existing data if any
+          if (existingData.length > 0) {
+            console.log('🔄 Restoring existing memories...');
+            const ids = existingData.map((_, index) => `migrated-${Date.now()}-${index}`);
+            const documents = existingData.map(data => data.content || '');
+            const metadatas = existingData.map(data => ({
+              ...data,
+              migrated: true,
+              originalId: data.id
+            }));
+            
+            await collection.add({
+              ids: ids,
+              documents: documents,
+              metadatas: metadatas
+            });
+            console.log(`✅ Restored ${existingData.length} memories`);
+          }
+          
+          console.log('📚 Collection migrated with embedding function');
         } else {
           throw queryError;
         }
