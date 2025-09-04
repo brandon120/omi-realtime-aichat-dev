@@ -816,7 +816,16 @@ I can remember things for you and help organize your thoughts!`;
         const category = categoryResponse.choices[0].message.content.trim().toLowerCase();
         
         // Save to memory
-        const memoryId = await saveMemory(session_id, memoryContent, category);
+        let memoryId;
+        try {
+            memoryId = await saveMemory(session_id, memoryContent, category);
+        } catch (memoryError) {
+            console.warn('⚠️ Failed to save memory:', memoryError.message);
+            return res.status(200).json({
+                message: 'Sorry, I had trouble saving that to memory. Please try again.',
+                error: memoryError.message
+            });
+        }
         
         // Store in conversation history
         manageConversationHistory(session_id, fullTranscript, `Saved to memory: "${memoryContent}"`);
@@ -891,10 +900,19 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
         const summary = summaryResponse.choices[0].message.content;
         
         // Save summary to memory
-        const memoryId = await saveMemory(session_id, summary, 'notes', {
-          type: 'conversation_summary',
-          original_length: history.length
-        });
+        let memoryId;
+        try {
+            memoryId = await saveMemory(session_id, summary, 'notes', {
+              type: 'conversation_summary',
+              original_length: history.length
+            });
+        } catch (memoryError) {
+            console.warn('⚠️ Failed to save notes to memory:', memoryError.message);
+            return res.status(200).json({
+                message: 'Sorry, I had trouble saving the notes. Please try again.',
+                error: memoryError.message
+            });
+        }
         
         // Store in conversation history
         manageConversationHistory(session_id, fullTranscript, `Created notes: ${summary}`);
@@ -960,10 +978,19 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
         }
         
         // Save todo list to memory
-        const memoryId = await saveMemory(session_id, todoList, 'todos', {
-          type: 'todo_list',
-          original_length: history.length
-        });
+        let memoryId;
+        try {
+            memoryId = await saveMemory(session_id, todoList, 'todos', {
+              type: 'todo_list',
+              original_length: history.length
+            });
+        } catch (memoryError) {
+            console.warn('⚠️ Failed to save todos to memory:', memoryError.message);
+            return res.status(200).json({
+                message: 'Sorry, I had trouble saving the todo list. Please try again.',
+                error: memoryError.message
+            });
+        }
         
         // Store in conversation history
         manageConversationHistory(session_id, fullTranscript, `Created todo list: ${todoList}`);
@@ -1045,8 +1072,13 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
          // Get conversation history for this session
          const history = getConversationHistory(session_id);
          
-         // Search for relevant memories
-         const relevantMemories = await searchMemories(session_id, question, 3);
+         // Search for relevant memories (with error handling)
+         let relevantMemories = [];
+         try {
+             relevantMemories = await searchMemories(session_id, question, 3);
+         } catch (memoryError) {
+             console.warn('⚠️ Memory search failed, continuing without memories:', memoryError.message);
+         }
          
          // Create context-aware input for the Responses API
          let contextInput = question;
@@ -1100,8 +1132,13 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
              // Get conversation history for fallback
              const history = getConversationHistory(session_id);
              
-             // Search for relevant memories
-             const relevantMemories = await searchMemories(session_id, question, 3);
+             // Search for relevant memories (with error handling)
+             let relevantMemories = [];
+             try {
+                 relevantMemories = await searchMemories(session_id, question, 3);
+             } catch (memoryError) {
+                 console.warn('⚠️ Memory search failed, continuing without memories:', memoryError.message);
+             }
              
              // Build messages array with conversation history
              const messages = [
@@ -1261,7 +1298,12 @@ app.listen(PORT, async () => {
   console.log(`📡 Webhook endpoint: http://localhost:${PORT}/omi-webhook`);
   
   // Initialize memory storage
-  await initializeMemoryStorage();
+  try {
+    await initializeMemoryStorage();
+  } catch (error) {
+    console.error('❌ Failed to initialize memory storage:', error.message);
+    console.warn('⚠️ Server will continue without memory features');
+  }
   
   // Check environment variables (Updated)
   if (!process.env.OPENAI_KEY) {
