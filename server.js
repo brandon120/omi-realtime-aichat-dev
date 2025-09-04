@@ -84,35 +84,8 @@ async function initializeMemoryStorage() {
     
     chromaClient = new ChromaClient(clientConfig);
     
-    // Create or get the memories collection with intelligent migration
-    // Use OpenAI embedding function from ChromaDB package
-    let embeddingFunction = null;
-    
-    if (!process.env.OPENAI_KEY || process.env.OPENAI_KEY.trim() === '') {
-      console.warn('⚠️ OPENAI_KEY not found or empty, creating collection without embedding function');
-    } else {
-      try {
-        const { OpenAIEmbeddingFunction } = require('chromadb');
-        embeddingFunction = new OpenAIEmbeddingFunction({
-          openai_api_key: process.env.OPENAI_KEY,
-          openai_model: "text-embedding-3-small"
-        });
-        
-        // Test the embedding function to make sure it works
-        try {
-          await embeddingFunction.generate(['test']);
-          console.log('✅ Using OpenAIEmbeddingFunction from chromadb package');
-        } catch (testError) {
-          console.warn('⚠️ OpenAIEmbeddingFunction test failed:', testError.message);
-          console.log('📝 Falling back to collection without embedding function');
-          embeddingFunction = null;
-        }
-      } catch (error) {
-        console.warn('⚠️ Failed to load OpenAIEmbeddingFunction:', error.message);
-        console.log('📝 Note: This requires a valid OPENAI_KEY environment variable');
-        embeddingFunction = null;
-      }
-    }
+    // Create or get the memories collection - using manual embeddings for Railway compatibility
+    console.log('📝 Using manual OpenAI embeddings for Railway compatibility');
     
     try {
       // Try to get existing collection first
@@ -140,16 +113,12 @@ async function initializeMemoryStorage() {
             console.log('⚠️ Could not retrieve existing data, will start fresh');
           }
           
-          // Delete and recreate collection with embedding function
+          // Delete and recreate collection without embedding function
           await chromaClient.deleteCollection({ name: "omi_memories" });
-          const collectionConfig = {
+          memoriesCollection = await chromaClient.createCollection({
             name: "omi_memories",
             metadata: { description: "Omi AI Chat Plugin Memory Storage" }
-          };
-          if (embeddingFunction) {
-            collectionConfig.embeddingFunction = embeddingFunction;
-          }
-          memoriesCollection = await chromaClient.createCollection(collectionConfig);
+          });
           
           // Restore existing data if any
           if (existingData.length > 0) {
@@ -170,23 +139,19 @@ async function initializeMemoryStorage() {
             console.log(`✅ Restored ${existingData.length} memories`);
           }
           
-          console.log(embeddingFunction ? '📚 Collection migrated with OpenAI embedding function' : '📚 Collection migrated without embedding function');
+          console.log('📚 Collection migrated with manual embeddings');
         } else {
           throw queryError;
         }
       }
     } catch (error) {
       if (error.message.includes('not found')) {
-        // Collection doesn't exist, create it with embedding function
-                  const collectionConfig = {
-            name: "omi_memories",
-            metadata: { description: "Omi AI Chat Plugin Memory Storage" }
-          };
-          if (embeddingFunction) {
-            collectionConfig.embeddingFunction = embeddingFunction;
-          }
-          memoriesCollection = await chromaClient.createCollection(collectionConfig);
-        console.log(embeddingFunction ? '📚 Created new collection with OpenAI embedding function' : '📚 Created new collection without embedding function');
+        // Collection doesn't exist, create it without embedding function
+        memoriesCollection = await chromaClient.createCollection({
+          name: "omi_memories",
+          metadata: { description: "Omi AI Chat Plugin Memory Storage" }
+        });
+        console.log('📚 Created new collection with manual embeddings');
       } else {
         throw error;
       }
@@ -417,10 +382,14 @@ async function saveMemory(userId, content, category = 'general', metadata = {}) 
             }
         };
 
-        // Store in ChromaDB (let ChromaDB handle embedding generation)
+        // Generate embedding manually
+        const embedding = await generateEmbedding(content);
+        
+        // Store in ChromaDB with manual embedding
         await memoriesCollection.add({
             ids: [memoryId],
             documents: [content],
+            embeddings: [embedding],
             metadatas: [memoryData]
         });
 
@@ -439,6 +408,25 @@ async function saveMemory(userId, content, category = 'general', metadata = {}) 
 }
 
 /**
+ * Generate embedding using OpenAI API directly
+ * @param {string} text - Text to embed
+ * @returns {Promise<Array>} Embedding vector
+ */
+async function generateEmbedding(text) {
+    if (!process.env.OPENAI_KEY) {
+        throw new Error('OPENAI_KEY is required for embedding generation');
+    }
+    
+    const openai = getOpenAIClient();
+    const response = await openai.embeddings.create({
+        model: "text-embedding-3-small",
+        input: text
+    });
+    
+    return response.data[0].embedding;
+}
+
+/**
  * Searches for relevant memories using semantic similarity
  * @param {string} userId - The user ID
  * @param {string} query - The search query
@@ -451,9 +439,12 @@ async function searchMemories(userId, query, limit = 5) {
     }
 
     try {
-        // Use queryTexts instead of queryEmbeddings for semantic search
+        // Generate embedding for the query
+        const queryEmbedding = await generateEmbedding(query);
+        
+        // Use queryEmbeddings for semantic search
         const results = await memoriesCollection.query({
-            queryTexts: [query],
+            queryEmbeddings: [queryEmbedding],
             nResults: limit,
             where: { userId: userId }
         });
@@ -556,8 +547,11 @@ async function getAllMemories(userId, options = {}) {
         
         // If search query provided, use semantic search
         if (searchQuery) {
+            // Generate embedding for the search query
+            const queryEmbedding = await generateEmbedding(searchQuery);
+            
             const searchResults = await memoriesCollection.query({
-                queryTexts: [searchQuery],
+                queryEmbeddings: [queryEmbedding],
                 nResults: limit,
                 where: whereClause
             });
@@ -720,8 +714,11 @@ async function advancedMemorySearch(userId, query, options = {}) {
             if (endDate) whereClause.timestamp["$lte"] = endDate;
         }
         
+        // Generate embedding for the query
+        const queryEmbedding = await generateEmbedding(query);
+        
         const results = await memoriesCollection.query({
-            queryTexts: [query],
+            queryEmbeddings: [queryEmbedding],
             nResults: limit,
             where: whereClause
         });

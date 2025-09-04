@@ -1,5 +1,25 @@
 // Script to verify ChromaDB setup for Omi AI Chat Plugin
 const { ChromaClient } = require('chromadb');
+const { OpenAI } = require('openai');
+require('dotenv').config();
+
+// Manual embedding generation using OpenAI API
+async function generateEmbedding(text) {
+    if (!process.env.OPENAI_KEY) {
+        throw new Error('OPENAI_KEY is required for embedding generation');
+    }
+    
+    const openai = new OpenAI({
+        apiKey: process.env.OPENAI_KEY
+    });
+    
+    const response = await openai.embeddings.create({
+        model: "text-embedding-3-small",
+        input: text
+    });
+    
+    return response.data[0].embedding;
+}
 
 async function verifyChromaDB() {
   const chromaUrl = process.env.CHROMA_URL || 'http://localhost:8000';
@@ -49,35 +69,8 @@ async function verifyChromaDB() {
       }
     }
     
-    // Create or get the collection with intelligent migration
-    // Use OpenAI embedding function from ChromaDB package
-    let embeddingFunction = null;
-    
-    if (!process.env.OPENAI_KEY || process.env.OPENAI_KEY.trim() === '') {
-      console.warn('⚠️ OPENAI_KEY not found or empty, creating collection without embedding function');
-    } else {
-      try {
-        const { OpenAIEmbeddingFunction } = require('chromadb');
-        embeddingFunction = new OpenAIEmbeddingFunction({
-          openai_api_key: process.env.OPENAI_KEY,
-          openai_model: "text-embedding-3-small"
-        });
-        
-        // Test the embedding function to make sure it works
-        try {
-          await embeddingFunction.generate(['test']);
-          console.log('✅ Using OpenAIEmbeddingFunction from chromadb package');
-        } catch (testError) {
-          console.warn('⚠️ OpenAIEmbeddingFunction test failed:', testError.message);
-          console.log('📝 Falling back to collection without embedding function');
-          embeddingFunction = null;
-        }
-      } catch (error) {
-        console.warn('⚠️ Failed to load OpenAIEmbeddingFunction:', error.message);
-        console.log('📝 Note: This requires a valid OPENAI_KEY environment variable');
-        embeddingFunction = null;
-      }
-    }
+    // Create or get the collection - using manual embeddings for Railway compatibility
+    console.log('📝 Using manual OpenAI embeddings for Railway compatibility');
     
     let collection;
     try {
@@ -107,16 +100,12 @@ async function verifyChromaDB() {
             console.log('⚠️ Could not retrieve existing data, will start fresh');
           }
           
-          // Delete and recreate collection with embedding function
+          // Delete and recreate collection without embedding function
           await chromaClient.deleteCollection({ name: "omi_memories" });
-          const collectionConfig = {
+          collection = await chromaClient.createCollection({
             name: "omi_memories",
             metadata: { description: "Omi AI Chat Plugin Memory Storage" }
-          };
-          if (embeddingFunction) {
-            collectionConfig.embeddingFunction = embeddingFunction;
-          }
-          collection = await chromaClient.createCollection(collectionConfig);
+          });
           
           // Restore existing data if any
           if (existingData.length > 0) {
@@ -137,7 +126,7 @@ async function verifyChromaDB() {
             console.log(`✅ Restored ${existingData.length} memories`);
           }
           
-          console.log('📚 Collection migrated with OpenAI embedding function');
+          console.log('📚 Collection migrated with manual embeddings');
         } else {
           throw queryError;
         }
@@ -149,7 +138,7 @@ async function verifyChromaDB() {
           name: "omi_memories",
           metadata: { description: "Omi AI Chat Plugin Memory Storage" }
         });
-        console.log('📚 Created new collection with OpenAI embedding function');
+        console.log('📚 Created new collection with manual embeddings');
       } else {
         throw error;
       }
@@ -158,11 +147,15 @@ async function verifyChromaDB() {
     console.log('✅ Collection "omi_memories" is ready');
     console.log('📊 Collection metadata:', collection.metadata);
     
-    // Test adding a sample document
+    // Test adding a sample document with manual embedding
     const testId = 'test-' + Date.now();
+    const testText = 'This is a test memory';
+    const testEmbedding = await generateEmbedding(testText);
+    
     await collection.add({
       ids: [testId],
-      documents: ['This is a test memory'],
+      documents: [testText],
+      embeddings: [testEmbedding],
       metadatas: [{ 
         userId: 'test-user', 
         category: 'test', 
@@ -172,12 +165,15 @@ async function verifyChromaDB() {
     });
     console.log('✅ Test document added successfully');
     
-    // Test querying
+    // Test querying with manual embedding
+    const queryText = 'test memory';
+    const queryEmbedding = await generateEmbedding(queryText);
+    
     const results = await collection.query({
-      queryTexts: ['test memory'],
+      queryEmbeddings: [queryEmbedding],
       nResults: 1
     });
-    console.log('✅ Query test successful, found:', results.documents[0].length, 'documents');
+    console.log('✅ Query test successful, found:', results.metadatas[0].length, 'documents');
     
     // Clean up test document
     await collection.delete({ ids: [testId] });
