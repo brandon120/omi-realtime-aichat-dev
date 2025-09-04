@@ -40,8 +40,29 @@ let memoriesCollection = null;
 // Initialize ChromaDB for vector storage
 async function initializeMemoryStorage() {
   try {
+    // Check if ChromaDB URL is provided
+    const chromaUrl = process.env.CHROMA_URL || "http://localhost:8000";
+    
+    // Try to connect to ChromaDB with a timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    
+    try {
+      const response = await fetch(`${chromaUrl}/api/v1/heartbeat`, {
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        throw new Error(`ChromaDB server responded with status: ${response.status}`);
+      }
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      throw new Error(`ChromaDB server not available at ${chromaUrl}. Please start ChromaDB server.`);
+    }
+    
     chromaClient = new ChromaClient({
-      path: process.env.CHROMA_URL || "http://localhost:8000"
+      path: chromaUrl
     });
     
     // Create or get the memories collection
@@ -52,8 +73,11 @@ async function initializeMemoryStorage() {
     
     console.log('✅ Memory storage initialized with ChromaDB');
   } catch (error) {
-    console.error('❌ Failed to initialize memory storage:', error);
-    console.log('⚠️ Memory features will be disabled');
+    console.error('❌ Failed to initialize ChromaDB:', error.message);
+    console.log('💡 To start ChromaDB server:');
+    console.log('   docker run -p 8000:8000 chromadb/chroma:latest');
+    console.log('   or set CHROMA_URL environment variable to your ChromaDB instance');
+    throw error; // Fail startup if ChromaDB is not available
   }
 }
 
@@ -63,10 +87,20 @@ const notificationHistory = new Map(); // Track notifications per user
 const MAX_NOTIFICATIONS_PER_HOUR = 10;
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour in milliseconds
 
-// Initialize OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_KEY,
-});
+// Initialize OpenAI client (lazy initialization)
+let openai = null;
+
+function getOpenAIClient() {
+  if (!openai) {
+    if (!process.env.OPENAI_KEY) {
+      throw new Error('OPENAI_KEY environment variable is not set');
+    }
+    openai = new OpenAI({
+      apiKey: process.env.OPENAI_KEY,
+    });
+  }
+  return openai;
+}
 
 // OpenAI Responses API configuration
 const OPENAI_MODEL = "gpt-4o"; // You can change this to "gpt-4.1" when available
@@ -239,7 +273,8 @@ function clearConversationHistory(sessionId) {
  */
 async function generateEmbedding(text) {
     try {
-        const response = await openai.embeddings.create({
+        const openaiClient = getOpenAIClient();
+        const response = await openaiClient.embeddings.create({
             model: "text-embedding-3-small",
             input: text
         });
@@ -260,7 +295,7 @@ async function generateEmbedding(text) {
  */
 async function saveMemory(userId, content, category = 'general', metadata = {}) {
     if (!chromaClient || !memoriesCollection) {
-        throw new Error('Memory storage not initialized');
+        throw new Error('Memory storage not initialized. ChromaDB is required.');
     }
 
     try {
@@ -310,7 +345,7 @@ async function saveMemory(userId, content, category = 'general', metadata = {}) 
  */
 async function searchMemories(userId, query, limit = 5) {
     if (!chromaClient || !memoriesCollection) {
-        return [];
+        throw new Error('Memory storage not initialized. ChromaDB is required.');
     }
 
     try {
@@ -325,7 +360,7 @@ async function searchMemories(userId, query, limit = 5) {
         return results.metadatas[0] || [];
     } catch (error) {
         console.error('❌ Error searching memories:', error);
-        return [];
+        throw error;
     }
 }
 
@@ -336,7 +371,7 @@ async function searchMemories(userId, query, limit = 5) {
  */
 async function getUserMemories(userId) {
     if (!chromaClient || !memoriesCollection) {
-        return memoryStorage.get(userId) || [];
+        throw new Error('Memory storage not initialized. ChromaDB is required.');
     }
 
     try {
@@ -347,7 +382,7 @@ async function getUserMemories(userId) {
         return results.metadatas || [];
     } catch (error) {
         console.error('❌ Error getting user memories:', error);
-        return memoryStorage.get(userId) || [];
+        throw error;
     }
 }
 
@@ -358,7 +393,7 @@ async function getUserMemories(userId) {
  */
 async function deleteMemory(memoryId) {
     if (!chromaClient || !memoriesCollection) {
-        return false;
+        throw new Error('Memory storage not initialized. ChromaDB is required.');
     }
 
     try {
@@ -379,7 +414,7 @@ async function deleteMemory(memoryId) {
         return true;
     } catch (error) {
         console.error('❌ Error deleting memory:', error);
-        return false;
+        throw error;
     }
 }
 
@@ -747,7 +782,8 @@ I can remember things for you and help organize your thoughts!`;
         }
         
         // Use AI to categorize the memory
-        const categoryResponse = await openai.chat.completions.create({
+        const openaiClient = getOpenAIClient();
+        const categoryResponse = await openaiClient.chat.completions.create({
           model: 'gpt-4o',
           messages: [
             { role: 'system', content: 'Categorize the following information into one of these categories: personal, work, learning, general, facts, preferences, or other. Respond with just the category name.' },
@@ -821,7 +857,8 @@ I can remember things for you and help organize your thoughts!`;
 Conversation:
 ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`).join('\n')}`;
 
-        const summaryResponse = await openai.chat.completions.create({
+        const openaiClient = getOpenAIClient();
+        const summaryResponse = await openaiClient.chat.completions.create({
           model: 'gpt-4o',
           messages: [
             { role: 'system', content: 'You are a helpful assistant that creates clear, concise conversation summaries.' },
@@ -882,7 +919,8 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
 Conversation:
 ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`).join('\n')}`;
 
-        const todoResponse = await openai.chat.completions.create({
+        const openaiClient = getOpenAIClient();
+        const todoResponse = await openaiClient.chat.completions.create({
           model: 'gpt-4o',
           messages: [
             { role: 'system', content: 'You are a helpful assistant that extracts actionable tasks from conversations. Format as a clear numbered list.' },
@@ -1019,7 +1057,8 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
          }
          
          // Use the new Responses API with web search and conversation context
-         const response = await openai.responses.create({
+         const openaiClient = getOpenAIClient();
+         const response = await openaiClient.responses.create({
              model: OPENAI_MODEL,
              tools: [WEB_SEARCH_TOOL],
              input: contextInput,
@@ -1074,7 +1113,8 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
              // Add current user message
              messages.push({ role: 'user', content: question });
              
-             const openaiResponse = await openai.chat.completions.create({
+             const openaiClient = getOpenAIClient();
+             const openaiResponse = await openaiClient.chat.completions.create({
                  model: 'gpt-4o',
                  messages: messages,
                  max_tokens: 800,
