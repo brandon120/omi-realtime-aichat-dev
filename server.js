@@ -84,10 +84,18 @@ async function initializeMemoryStorage() {
     
     chromaClient = new ChromaClient(clientConfig);
     
-    // Create or get the memories collection with embedding function
+    // Create or get the memories collection with custom embedding function
+    const { OpenAIEmbeddingFunction } = require('chromadb');
+    
+    const embeddingFunction = new OpenAIEmbeddingFunction({
+      openai_api_key: process.env.OPENAI_KEY,
+      openai_model: "text-embedding-3-small"
+    });
+    
     memoriesCollection = await chromaClient.getOrCreateCollection({
       name: "omi_memories",
-      metadata: { description: "Omi AI Chat Plugin Memory Storage" }
+      metadata: { description: "Omi AI Chat Plugin Memory Storage" },
+      embeddingFunction: embeddingFunction
     });
     
     console.log('✅ Memory storage initialized with ChromaDB');

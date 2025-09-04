@@ -49,10 +49,18 @@ async function verifyChromaDB() {
       }
     }
     
-    // Create or get the collection (this is what the app does)
+    // Create or get the collection with OpenAI embedding function
+    const { OpenAIEmbeddingFunction } = require('chromadb');
+    
+    const embeddingFunction = new OpenAIEmbeddingFunction({
+      openai_api_key: process.env.OPENAI_KEY,
+      openai_model: "text-embedding-3-small"
+    });
+    
     const collection = await chromaClient.getOrCreateCollection({
       name: "omi_memories",
-      metadata: { description: "Omi AI Chat Plugin Memory Storage" }
+      metadata: { description: "Omi AI Chat Plugin Memory Storage" },
+      embeddingFunction: embeddingFunction
     });
     
     console.log('✅ Collection "omi_memories" is ready');
