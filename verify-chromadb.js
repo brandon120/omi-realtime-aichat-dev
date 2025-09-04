@@ -50,10 +50,10 @@ async function verifyChromaDB() {
     }
     
     // Create or get the collection with intelligent migration
-    // Use default embedding function from chromadb-default-embed
+    // Use default embedding function from chromadb-default-embed with dynamic import
     let embeddingFunction;
     try {
-      const { DefaultEmbeddingFunction } = require('chromadb-default-embed');
+      const { DefaultEmbeddingFunction } = await import('chromadb-default-embed');
       embeddingFunction = new DefaultEmbeddingFunction();
       console.log('✅ Using DefaultEmbeddingFunction from chromadb-default-embed');
     } catch (error) {

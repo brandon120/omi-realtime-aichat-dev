@@ -85,10 +85,10 @@ async function initializeMemoryStorage() {
     chromaClient = new ChromaClient(clientConfig);
     
     // Create or get the memories collection with intelligent migration
-    // Use default embedding function from chromadb-default-embed
+    // Use default embedding function from chromadb-default-embed with dynamic import
     let embeddingFunction;
     try {
-      const { DefaultEmbeddingFunction } = require('chromadb-default-embed');
+      const { DefaultEmbeddingFunction } = await import('chromadb-default-embed');
       embeddingFunction = new DefaultEmbeddingFunction();
       console.log('✅ Using DefaultEmbeddingFunction from chromadb-default-embed');
     } catch (error) {
@@ -503,6 +503,227 @@ async function deleteMemory(memoryId) {
     }
 }
 
+/**
+ * Get all memories for a user with advanced filtering and pagination
+ * @param {string} userId - The user ID
+ * @param {Object} options - Filtering and pagination options
+ * @returns {Promise<Object>} Paginated memories with metadata
+ */
+async function getAllMemories(userId, options = {}) {
+    if (!chromaClient || !memoriesCollection) {
+        throw new Error('Memory storage not initialized. ChromaDB is required.');
+    }
+    
+    const {
+        limit = 50,
+        offset = 0,
+        category = null,
+        startDate = null,
+        endDate = null,
+        searchQuery = null
+    } = options;
+    
+    try {
+        // Build where clause for filtering
+        const whereClause = { userId: { "$eq": userId } };
+        
+        if (category) {
+            whereClause.category = { "$eq": category };
+        }
+        
+        if (startDate || endDate) {
+            whereClause.timestamp = {};
+            if (startDate) whereClause.timestamp["$gte"] = startDate;
+            if (endDate) whereClause.timestamp["$lte"] = endDate;
+        }
+        
+        // If search query provided, use semantic search
+        if (searchQuery) {
+            const searchResults = await memoriesCollection.query({
+                queryTexts: [searchQuery],
+                nResults: limit,
+                where: whereClause
+            });
+            
+            return {
+                memories: searchResults.metadatas[0] || [],
+                total: searchResults.metadatas[0]?.length || 0,
+                hasMore: false
+            };
+        }
+        
+        // Otherwise, get all memories with filters
+        const results = await memoriesCollection.get({
+            where: whereClause,
+            limit: limit,
+            offset: offset
+        });
+        
+        return {
+            memories: results.metadatas || [],
+            total: results.metadatas?.length || 0,
+            hasMore: results.metadatas?.length === limit
+        };
+    } catch (error) {
+        console.error('❌ Error getting memories:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get memory by ID with full details
+ * @param {string} memoryId - The memory ID
+ * @returns {Promise<Object|null>} Memory object or null if not found
+ */
+async function getMemoryById(memoryId) {
+    if (!chromaClient || !memoriesCollection) {
+        throw new Error('Memory storage not initialized. ChromaDB is required.');
+    }
+    
+    try {
+        const results = await memoriesCollection.get({
+            ids: [memoryId]
+        });
+        
+        if (results.metadatas && results.metadatas.length > 0) {
+            return {
+                id: memoryId,
+                content: results.documents[0],
+                metadata: results.metadatas[0]
+            };
+        }
+        
+        return null;
+    } catch (error) {
+        console.error('❌ Error getting memory by ID:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get memory categories for a user
+ * @param {string} userId - The user ID
+ * @returns {Promise<Array>} Array of unique categories
+ */
+async function getMemoryCategories(userId) {
+    if (!chromaClient || !memoriesCollection) {
+        throw new Error('Memory storage not initialized. ChromaDB is required.');
+    }
+    
+    try {
+        const results = await memoriesCollection.get({
+            where: { userId: { "$eq": userId } }
+        });
+        
+        const categories = new Set();
+        results.metadatas?.forEach(metadata => {
+            if (metadata.category) {
+                categories.add(metadata.category);
+            }
+        });
+        
+        return Array.from(categories).sort();
+    } catch (error) {
+        console.error('❌ Error getting memory categories:', error);
+        throw error;
+    }
+}
+
+/**
+ * Update memory content and metadata
+ * @param {string} memoryId - The memory ID
+ * @param {string} newContent - New content for the memory
+ * @param {Object} newMetadata - New metadata to merge
+ * @returns {Promise<boolean>} Success status
+ */
+async function updateMemory(memoryId, newContent, newMetadata = {}) {
+    if (!chromaClient || !memoriesCollection) {
+        throw new Error('Memory storage not initialized. ChromaDB is required.');
+    }
+    
+    try {
+        // Get existing memory first
+        const existing = await getMemoryById(memoryId);
+        if (!existing) {
+            throw new Error('Memory not found');
+        }
+        
+        // Update with new content and merged metadata
+        const updatedMetadata = {
+            ...existing.metadata,
+            ...newMetadata,
+            updatedAt: new Date().toISOString()
+        };
+        
+        await memoriesCollection.update({
+            ids: [memoryId],
+            documents: [newContent],
+            metadatas: [updatedMetadata]
+        });
+        
+        console.log(`📝 Updated memory: ${memoryId}`);
+        return true;
+    } catch (error) {
+        console.error('❌ Error updating memory:', error);
+        throw error;
+    }
+}
+
+/**
+ * Search memories with advanced options
+ * @param {string} userId - The user ID
+ * @param {string} query - Search query
+ * @param {Object} options - Search options
+ * @returns {Promise<Array>} Search results
+ */
+async function advancedMemorySearch(userId, query, options = {}) {
+    if (!chromaClient || !memoriesCollection) {
+        throw new Error('Memory storage not initialized. ChromaDB is required.');
+    }
+    
+    const {
+        limit = 10,
+        category = null,
+        startDate = null,
+        endDate = null,
+        minSimilarity = 0.0
+    } = options;
+    
+    try {
+        // Build where clause for filtering
+        const whereClause = { userId: { "$eq": userId } };
+        
+        if (category) {
+            whereClause.category = { "$eq": category };
+        }
+        
+        if (startDate || endDate) {
+            whereClause.timestamp = {};
+            if (startDate) whereClause.timestamp["$gte"] = startDate;
+            if (endDate) whereClause.timestamp["$lte"] = endDate;
+        }
+        
+        const results = await memoriesCollection.query({
+            queryTexts: [query],
+            nResults: limit,
+            where: whereClause
+        });
+        
+        // Filter by similarity if specified
+        const filteredResults = results.metadatas[0] || [];
+        if (minSimilarity > 0 && results.distances && results.distances[0]) {
+            return filteredResults.filter((_, index) => 
+                results.distances[0][index] >= minSimilarity
+            );
+        }
+        
+        return filteredResults;
+    } catch (error) {
+        console.error('❌ Error in advanced memory search:', error);
+        throw error;
+    }
+}
+
 // Web search is now handled automatically by OpenAI's web_search_preview tool
 
 // Middleware
@@ -792,6 +1013,258 @@ app.delete('/memories/:memoryId', async (req, res) => {
     console.error('❌ Error deleting memory:', error);
     res.status(500).json({
       error: 'Failed to delete memory',
+      message: error.message
+    });
+  }
+});
+
+// Advanced memory search and retrieval endpoints
+
+// Get all memories with advanced filtering and pagination
+app.get('/memories/:userId/all', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const {
+      limit = 50,
+      offset = 0,
+      category = null,
+      startDate = null,
+      endDate = null,
+      searchQuery = null
+    } = req.query;
+    
+    const options = {
+      limit: parseInt(limit),
+      offset: parseInt(offset),
+      category: category || null,
+      startDate: startDate || null,
+      endDate: endDate || null,
+      searchQuery: searchQuery || null
+    };
+    
+    const result = await getAllMemories(userId, options);
+    
+    res.status(200).json({
+      user_id: userId,
+      memories: result.memories,
+      total: result.total,
+      hasMore: result.hasMore,
+      pagination: {
+        limit: options.limit,
+        offset: options.offset
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error getting all memories:', error);
+    res.status(500).json({
+      error: 'Failed to get memories',
+      message: error.message
+    });
+  }
+});
+
+// Get specific memory by ID
+app.get('/memories/details/:memoryId', async (req, res) => {
+  try {
+    const { memoryId } = req.params;
+    const memory = await getMemoryById(memoryId);
+    
+    if (memory) {
+      res.status(200).json({
+        memory: memory
+      });
+    } else {
+      res.status(404).json({
+        error: 'Memory not found',
+        message: 'Memory with the specified ID was not found'
+      });
+    }
+  } catch (error) {
+    console.error('❌ Error getting memory by ID:', error);
+    res.status(500).json({
+      error: 'Failed to get memory',
+      message: error.message
+    });
+  }
+});
+
+// Get memory categories for a user
+app.get('/memories/:userId/categories', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const categories = await getMemoryCategories(userId);
+    
+    res.status(200).json({
+      user_id: userId,
+      categories: categories,
+      count: categories.length
+    });
+  } catch (error) {
+    console.error('❌ Error getting memory categories:', error);
+    res.status(500).json({
+      error: 'Failed to get memory categories',
+      message: error.message
+    });
+  }
+});
+
+// Advanced memory search with filters
+app.post('/memories/search/advanced', async (req, res) => {
+  try {
+    const { 
+      userId, 
+      query, 
+      limit = 10, 
+      category = null, 
+      startDate = null, 
+      endDate = null, 
+      minSimilarity = 0.0 
+    } = req.body;
+    
+    if (!userId || !query) {
+      return res.status(400).json({
+        error: 'Missing required fields',
+        message: 'userId and query are required'
+      });
+    }
+    
+    const options = {
+      limit: parseInt(limit),
+      category: category || null,
+      startDate: startDate || null,
+      endDate: endDate || null,
+      minSimilarity: parseFloat(minSimilarity)
+    };
+    
+    const memories = await advancedMemorySearch(userId, query, options);
+    
+    res.status(200).json({
+      user_id: userId,
+      query: query,
+      memories: memories,
+      count: memories.length,
+      filters: options
+    });
+  } catch (error) {
+    console.error('❌ Error in advanced memory search:', error);
+    res.status(500).json({
+      error: 'Failed to search memories',
+      message: error.message
+    });
+  }
+});
+
+// Update memory content and metadata
+app.put('/memories/:memoryId', async (req, res) => {
+  try {
+    const { memoryId } = req.params;
+    const { content, metadata = {} } = req.body;
+    
+    if (!content) {
+      return res.status(400).json({
+        error: 'Missing required fields',
+        message: 'content is required'
+      });
+    }
+    
+    const success = await updateMemory(memoryId, content, metadata);
+    
+    if (success) {
+      res.status(200).json({
+        memory_id: memoryId,
+        message: 'Memory updated successfully'
+      });
+    } else {
+      res.status(404).json({
+        error: 'Memory not found',
+        message: 'Memory with the specified ID was not found'
+      });
+    }
+  } catch (error) {
+    console.error('❌ Error updating memory:', error);
+    res.status(500).json({
+      error: 'Failed to update memory',
+      message: error.message
+    });
+  }
+});
+
+// Export memories for a user (backup/analysis)
+app.get('/memories/:userId/export', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { format = 'json' } = req.query;
+    
+    const result = await getAllMemories(userId, { limit: 1000 }); // Get up to 1000 memories
+    
+    if (format === 'csv') {
+      // Convert to CSV format
+      const csvHeader = 'ID,Content,Category,Timestamp,Type\n';
+      const csvRows = result.memories.map(memory => 
+        `"${memory.id}","${memory.content.replace(/"/g, '""')}","${memory.category || ''}","${memory.timestamp || ''}","${memory.type || ''}"`
+      ).join('\n');
+      
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="memories_${userId}_${new Date().toISOString().split('T')[0]}.csv"`);
+      res.status(200).send(csvHeader + csvRows);
+    } else {
+      // Default JSON format
+      res.status(200).json({
+        user_id: userId,
+        export_date: new Date().toISOString(),
+        total_memories: result.total,
+        memories: result.memories
+      });
+    }
+  } catch (error) {
+    console.error('❌ Error exporting memories:', error);
+    res.status(500).json({
+      error: 'Failed to export memories',
+      message: error.message
+    });
+  }
+});
+
+// Memory statistics for a user
+app.get('/memories/:userId/stats', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const result = await getAllMemories(userId, { limit: 1000 });
+    
+    // Calculate statistics
+    const categories = {};
+    const typeCounts = {};
+    const monthlyCounts = {};
+    
+    result.memories.forEach(memory => {
+      // Category stats
+      const category = memory.category || 'uncategorized';
+      categories[category] = (categories[category] || 0) + 1;
+      
+      // Type stats
+      const type = memory.type || 'memory';
+      typeCounts[type] = (typeCounts[type] || 0) + 1;
+      
+      // Monthly stats
+      if (memory.timestamp) {
+        const month = memory.timestamp.substring(0, 7); // YYYY-MM
+        monthlyCounts[month] = (monthlyCounts[month] || 0) + 1;
+      }
+    });
+    
+    res.status(200).json({
+      user_id: userId,
+      total_memories: result.total,
+      categories: categories,
+      types: typeCounts,
+      monthly_breakdown: monthlyCounts,
+      most_common_category: Object.keys(categories).reduce((a, b) => categories[a] > categories[b] ? a : b, 'uncategorized'),
+      most_common_type: Object.keys(typeCounts).reduce((a, b) => typeCounts[a] > typeCounts[b] ? a : b, 'memory')
+    });
+  } catch (error) {
+    console.error('❌ Error getting memory statistics:', error);
+    res.status(500).json({
+      error: 'Failed to get memory statistics',
       message: error.message
     });
   }
