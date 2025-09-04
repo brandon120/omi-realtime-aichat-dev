@@ -85,11 +85,9 @@ async function initializeMemoryStorage() {
     chromaClient = new ChromaClient(clientConfig);
     
     // Create or get the memories collection with intelligent migration
-    const { OpenAIEmbeddingFunction } = require('chromadb');
-    
-    const embeddingFunction = new OpenAIEmbeddingFunction({
-      openai_api_key: process.env.OPENAI_KEY
-    });
+    // Use default embedding function from chromadb-default-embed
+    const { DefaultEmbeddingFunction } = require('chromadb-default-embed');
+    const embeddingFunction = new DefaultEmbeddingFunction();
     
     try {
       // Try to get existing collection first

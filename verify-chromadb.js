@@ -50,11 +50,7 @@ async function verifyChromaDB() {
     }
     
     // Create or get the collection with intelligent migration
-    const { OpenAIEmbeddingFunction } = require('chromadb');
-    
-    const embeddingFunction = new OpenAIEmbeddingFunction({
-      openai_api_key: process.env.OPENAI_KEY
-    });
+    // Try without embedding function first
     
     let collection;
     try {
@@ -83,8 +79,7 @@ async function verifyChromaDB() {
         // Collection doesn't exist, create it with embedding function
         collection = await chromaClient.createCollection({
           name: "omi_memories",
-          metadata: { description: "Omi AI Chat Plugin Memory Storage" },
-          embeddingFunction: embeddingFunction
+          metadata: { description: "Omi AI Chat Plugin Memory Storage" }
         });
         console.log('📚 Created new collection with OpenAI embedding function');
       } else {
