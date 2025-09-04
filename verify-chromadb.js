@@ -50,14 +50,17 @@ async function verifyChromaDB() {
     }
     
     // Create or get the collection with intelligent migration
-    // Use default embedding function from chromadb-default-embed with dynamic import
+    // Use OpenAI embedding function from ChromaDB package
     let embeddingFunction;
     try {
-      const { DefaultEmbeddingFunction } = await import('chromadb-default-embed');
-      embeddingFunction = new DefaultEmbeddingFunction();
-      console.log('✅ Using DefaultEmbeddingFunction from chromadb-default-embed');
+      const { OpenAIEmbeddingFunction } = require('chromadb');
+      embeddingFunction = new OpenAIEmbeddingFunction({
+        openai_api_key: process.env.OPENAI_KEY,
+        openai_model: "text-embedding-3-small"
+      });
+      console.log('✅ Using OpenAIEmbeddingFunction from chromadb package');
     } catch (error) {
-      console.warn('⚠️ Failed to load DefaultEmbeddingFunction:', error.message);
+      console.warn('⚠️ Failed to load OpenAIEmbeddingFunction:', error.message);
       console.log('📝 Note: This requires a valid OPENAI_KEY environment variable');
       embeddingFunction = null;
     }
@@ -77,7 +80,7 @@ async function verifyChromaDB() {
         });
         console.log('📚 Using existing collection with embedding function');
       } catch (queryError) {
-        if (queryError.message.includes('Bad request') || queryError.message.includes('400') || queryError.message.includes('generate')) {
+        if (queryError.message.includes('Bad request') || queryError.message.includes('400') || queryError.message.includes('generate') || queryError.message.includes('chromadb-default-embed')) {
           console.log('🔄 Collection needs migration, performing migration...');
           
           // Get existing data before deleting
@@ -120,7 +123,7 @@ async function verifyChromaDB() {
             console.log(`✅ Restored ${existingData.length} memories`);
           }
           
-          console.log('📚 Collection migrated with embedding function');
+          console.log('📚 Collection migrated with OpenAI embedding function');
         } else {
           throw queryError;
         }

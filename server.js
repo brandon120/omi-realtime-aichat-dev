@@ -85,14 +85,17 @@ async function initializeMemoryStorage() {
     chromaClient = new ChromaClient(clientConfig);
     
     // Create or get the memories collection with intelligent migration
-    // Use default embedding function from chromadb-default-embed with dynamic import
+    // Use OpenAI embedding function from ChromaDB package
     let embeddingFunction;
     try {
-      const { DefaultEmbeddingFunction } = await import('chromadb-default-embed');
-      embeddingFunction = new DefaultEmbeddingFunction();
-      console.log('✅ Using DefaultEmbeddingFunction from chromadb-default-embed');
+      const { OpenAIEmbeddingFunction } = require('chromadb');
+      embeddingFunction = new OpenAIEmbeddingFunction({
+        openai_api_key: process.env.OPENAI_KEY,
+        openai_model: "text-embedding-3-small"
+      });
+      console.log('✅ Using OpenAIEmbeddingFunction from chromadb package');
     } catch (error) {
-      console.warn('⚠️ Failed to load DefaultEmbeddingFunction:', error.message);
+      console.warn('⚠️ Failed to load OpenAIEmbeddingFunction:', error.message);
       console.log('📝 Note: This requires a valid OPENAI_KEY environment variable');
       embeddingFunction = null;
     }
@@ -111,7 +114,7 @@ async function initializeMemoryStorage() {
         });
         console.log('📚 Using existing collection with embedding function');
       } catch (queryError) {
-        if (queryError.message.includes('Bad request') || queryError.message.includes('400')) {
+        if (queryError.message.includes('Bad request') || queryError.message.includes('400') || queryError.message.includes('chromadb-default-embed')) {
           console.log('🔄 Collection exists but needs embedding function, migrating...');
           // Get existing data before deleting
           let existingData = [];
