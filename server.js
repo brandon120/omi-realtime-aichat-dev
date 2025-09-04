@@ -84,19 +84,30 @@ async function initializeMemoryStorage() {
     
     chromaClient = new ChromaClient(clientConfig);
     
-    // Create or get the memories collection with custom embedding function
+    // Create or get the memories collection
+    // First, try to delete the existing collection if it exists (to ensure clean state)
+    try {
+      await chromaClient.deleteCollection({ name: "omi_memories" });
+      console.log('🗑️ Deleted existing collection to ensure clean state');
+    } catch (error) {
+      // Collection doesn't exist, that's fine
+      console.log('📚 No existing collection to delete');
+    }
+    
+    // Create new collection with OpenAI embedding function
     const { OpenAIEmbeddingFunction } = require('chromadb');
     
     const embeddingFunction = new OpenAIEmbeddingFunction({
-      openai_api_key: process.env.OPENAI_KEY,
-      openai_model: "text-embedding-3-small"
+      openai_api_key: process.env.OPENAI_KEY
     });
     
-    memoriesCollection = await chromaClient.getOrCreateCollection({
+    memoriesCollection = await chromaClient.createCollection({
       name: "omi_memories",
       metadata: { description: "Omi AI Chat Plugin Memory Storage" },
       embeddingFunction: embeddingFunction
     });
+    
+    console.log('📚 Created new collection with OpenAI embedding function');
     
     console.log('✅ Memory storage initialized with ChromaDB');
     console.log('📊 Collection name: omi_memories');

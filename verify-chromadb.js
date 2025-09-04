@@ -50,18 +50,29 @@ async function verifyChromaDB() {
     }
     
     // Create or get the collection with OpenAI embedding function
+    // First, try to delete the existing collection if it exists (to ensure clean state)
+    try {
+      await chromaClient.deleteCollection({ name: "omi_memories" });
+      console.log('🗑️ Deleted existing collection to ensure clean state');
+    } catch (error) {
+      // Collection doesn't exist, that's fine
+      console.log('📚 No existing collection to delete');
+    }
+    
+    // Create new collection with OpenAI embedding function
     const { OpenAIEmbeddingFunction } = require('chromadb');
     
     const embeddingFunction = new OpenAIEmbeddingFunction({
-      openai_api_key: process.env.OPENAI_KEY,
-      openai_model: "text-embedding-3-small"
+      openai_api_key: process.env.OPENAI_KEY
     });
     
-    const collection = await chromaClient.getOrCreateCollection({
+    const collection = await chromaClient.createCollection({
       name: "omi_memories",
       metadata: { description: "Omi AI Chat Plugin Memory Storage" },
       embeddingFunction: embeddingFunction
     });
+    
+    console.log('📚 Created new collection with OpenAI embedding function');
     
     console.log('✅ Collection "omi_memories" is ready');
     console.log('📊 Collection metadata:', collection.metadata);
