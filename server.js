@@ -1,6 +1,8 @@
 const express = require('express');
 const https = require('https');
 const OpenAI = require('openai');
+const { ChromaClient } = require('chromadb');
+const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
 
 /**
@@ -29,6 +31,31 @@ const conversationHistory = new Map();
 
 // Track processed content to prevent duplicate notifications
 const processedContent = new Map();
+
+// Memory storage for vector-based semantic search
+const memoryStorage = new Map(); // In-memory cache for quick access
+let chromaClient = null;
+let memoriesCollection = null;
+
+// Initialize ChromaDB for vector storage
+async function initializeMemoryStorage() {
+  try {
+    chromaClient = new ChromaClient({
+      path: process.env.CHROMA_URL || "http://localhost:8000"
+    });
+    
+    // Create or get the memories collection
+    memoriesCollection = await chromaClient.getOrCreateCollection({
+      name: "omi_memories",
+      metadata: { description: "Omi AI Chat Plugin Memory Storage" }
+    });
+    
+    console.log('✅ Memory storage initialized with ChromaDB');
+  } catch (error) {
+    console.error('❌ Failed to initialize memory storage:', error);
+    console.log('⚠️ Memory features will be disabled');
+  }
+}
 
 // Rate limiting for Omi notifications (max 10 per hour)
 const notificationQueue = [];
@@ -205,6 +232,157 @@ function clearConversationHistory(sessionId) {
     console.log(`🧹 Cleared conversation history for session: ${sessionId}`);
 }
 
+/**
+ * Generates embeddings for text using OpenAI
+ * @param {string} text - The text to embed
+ * @returns {Promise<number[]>} The embedding vector
+ */
+async function generateEmbedding(text) {
+    try {
+        const response = await openai.embeddings.create({
+            model: "text-embedding-3-small",
+            input: text
+        });
+        return response.data[0].embedding;
+    } catch (error) {
+        console.error('❌ Error generating embedding:', error);
+        throw error;
+    }
+}
+
+/**
+ * Saves a memory to the vector store
+ * @param {string} userId - The user ID
+ * @param {string} content - The memory content
+ * @param {string} category - The memory category
+ * @param {object} metadata - Additional metadata
+ * @returns {Promise<string>} The memory ID
+ */
+async function saveMemory(userId, content, category = 'general', metadata = {}) {
+    if (!chromaClient || !memoriesCollection) {
+        throw new Error('Memory storage not initialized');
+    }
+
+    try {
+        const memoryId = uuidv4();
+        const embedding = await generateEmbedding(content);
+        
+        const memoryData = {
+            id: memoryId,
+            userId: userId,
+            content: content,
+            category: category,
+            timestamp: new Date().toISOString(),
+            metadata: {
+                ...metadata,
+                source: 'conversation'
+            }
+        };
+
+        // Store in ChromaDB
+        await memoriesCollection.add({
+            ids: [memoryId],
+            embeddings: [embedding],
+            documents: [content],
+            metadatas: [memoryData]
+        });
+
+        // Cache in memory for quick access
+        if (!memoryStorage.has(userId)) {
+            memoryStorage.set(userId, []);
+        }
+        memoryStorage.get(userId).push(memoryData);
+
+        console.log(`💾 Saved memory for user ${userId}: ${content.substring(0, 50)}...`);
+        return memoryId;
+    } catch (error) {
+        console.error('❌ Error saving memory:', error);
+        throw error;
+    }
+}
+
+/**
+ * Searches for relevant memories using semantic similarity
+ * @param {string} userId - The user ID
+ * @param {string} query - The search query
+ * @param {number} limit - Maximum number of results
+ * @returns {Promise<Array>} Array of relevant memories
+ */
+async function searchMemories(userId, query, limit = 5) {
+    if (!chromaClient || !memoriesCollection) {
+        return [];
+    }
+
+    try {
+        const queryEmbedding = await generateEmbedding(query);
+        
+        const results = await memoriesCollection.query({
+            queryEmbeddings: [queryEmbedding],
+            nResults: limit,
+            where: { userId: userId }
+        });
+
+        return results.metadatas[0] || [];
+    } catch (error) {
+        console.error('❌ Error searching memories:', error);
+        return [];
+    }
+}
+
+/**
+ * Gets all memories for a user
+ * @param {string} userId - The user ID
+ * @returns {Promise<Array>} Array of user's memories
+ */
+async function getUserMemories(userId) {
+    if (!chromaClient || !memoriesCollection) {
+        return memoryStorage.get(userId) || [];
+    }
+
+    try {
+        const results = await memoriesCollection.get({
+            where: { userId: userId }
+        });
+
+        return results.metadatas || [];
+    } catch (error) {
+        console.error('❌ Error getting user memories:', error);
+        return memoryStorage.get(userId) || [];
+    }
+}
+
+/**
+ * Deletes a memory by ID
+ * @param {string} memoryId - The memory ID to delete
+ * @returns {Promise<boolean>} Success status
+ */
+async function deleteMemory(memoryId) {
+    if (!chromaClient || !memoriesCollection) {
+        return false;
+    }
+
+    try {
+        await memoriesCollection.delete({
+            ids: [memoryId]
+        });
+
+        // Remove from memory cache
+        for (const [userId, memories] of memoryStorage.entries()) {
+            const index = memories.findIndex(m => m.id === memoryId);
+            if (index !== -1) {
+                memories.splice(index, 1);
+                break;
+            }
+        }
+
+        console.log(`🗑️ Deleted memory: ${memoryId}`);
+        return true;
+    } catch (error) {
+        console.error('❌ Error deleting memory:', error);
+        return false;
+    }
+}
+
 // Web search is now handled automatically by OpenAI's web_search_preview tool
 
 // Middleware
@@ -247,6 +425,17 @@ app.get('/health', (req, res) => {
       active_conversations: conversationHistory.size,
       context_management: 'enabled',
       token_limit_handling: 'automatic'
+    },
+    memory_system: {
+      vector_store: chromaClient ? 'ChromaDB' : 'disabled',
+      memory_features: [
+        'save to memory',
+        'save notes',
+        'save as todos',
+        'clear context'
+      ],
+      total_memories: memoryStorage.size,
+      status: chromaClient ? 'active' : 'disabled'
     }
   });
 });
@@ -326,6 +515,79 @@ app.delete('/conversation/:sessionId', (req, res) => {
   });
 });
 
+// Memory management endpoints
+app.get('/memories/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const memories = await getUserMemories(userId);
+    
+    res.status(200).json({
+      user_id: userId,
+      memories: memories,
+      count: memories.length
+    });
+  } catch (error) {
+    console.error('❌ Error getting user memories:', error);
+    res.status(500).json({
+      error: 'Failed to get memories',
+      message: error.message
+    });
+  }
+});
+
+app.post('/memories/search', async (req, res) => {
+  try {
+    const { userId, query, limit = 5 } = req.body;
+    
+    if (!userId || !query) {
+      return res.status(400).json({
+        error: 'Missing required fields',
+        message: 'userId and query are required'
+      });
+    }
+    
+    const memories = await searchMemories(userId, query, limit);
+    
+    res.status(200).json({
+      user_id: userId,
+      query: query,
+      memories: memories,
+      count: memories.length
+    });
+  } catch (error) {
+    console.error('❌ Error searching memories:', error);
+    res.status(500).json({
+      error: 'Failed to search memories',
+      message: error.message
+    });
+  }
+});
+
+app.delete('/memories/:memoryId', async (req, res) => {
+  try {
+    const { memoryId } = req.params;
+    const success = await deleteMemory(memoryId);
+    
+    if (success) {
+      res.status(200).json({
+        memory_id: memoryId,
+        message: 'Memory deleted successfully'
+      });
+    } else {
+      res.status(404).json({
+        error: 'Memory not found',
+        message: 'Memory with the specified ID was not found'
+      });
+    }
+  } catch (error) {
+    console.error('❌ Error deleting memory:', error);
+    res.status(500).json({
+      error: 'Failed to delete memory',
+      message: error.message
+    });
+  }
+});
+
 // Main Omi webhook endpoint
 app.post('/omi-webhook', async (req, res) => {
   try {
@@ -380,7 +642,47 @@ app.post('/omi-webhook', async (req, res) => {
       'keywords', 'trigger words', 'how to talk to you'
     ];
     
+    // Memory management keywords
+    const memoryKeywords = [
+      'save to memory', 'remember this', 'store information', 'save information',
+      'save as memory', 'memorize this', 'keep this', 'save this'
+    ];
+    
+    // Notes and summary keywords
+    const notesKeywords = [
+      'save notes', 'create summary', 'save this conversation', 'summarize',
+      'save as notes', 'make notes', 'take notes', 'conversation summary'
+    ];
+    
+    // Todo list keywords
+    const todoKeywords = [
+      'save as todos', 'create todo list', 'extract tasks', 'make todo list',
+      'save as tasks', 'create tasks', 'todo list', 'task list'
+    ];
+    
+    // Context management keywords
+    const contextKeywords = [
+      'clear context', 'start fresh', 'forget this conversation', 'reset',
+      'clear memory', 'new conversation', 'forget everything'
+    ];
+    
     const isAskingForHelp = helpKeywords.some(keyword => 
+      transcriptLower.includes(keyword)
+    );
+    
+    const isMemoryCommand = memoryKeywords.some(keyword => 
+      transcriptLower.includes(keyword)
+    );
+    
+    const isNotesCommand = notesKeywords.some(keyword => 
+      transcriptLower.includes(keyword)
+    );
+    
+    const isTodoCommand = todoKeywords.some(keyword => 
+      transcriptLower.includes(keyword)
+    );
+    
+    const isContextCommand = contextKeywords.some(keyword => 
       transcriptLower.includes(keyword)
     );
     
@@ -403,7 +705,15 @@ app.post('/omi-webhook', async (req, res) => {
     // Prioritize help requests over general AI interactions to prevent duplicates
     if (isAskingForHelp) {
       // User is asking for help, provide helpful response
-      const helpMessage = `Hi! I'm Omi, your AI assistant. You can talk to me naturally! Try asking questions like "What's the weather like?" or "Can you search for current news?" I'll automatically detect when you need my help.`;
+      const helpMessage = `Hi! I'm Omi, your AI assistant. You can talk to me naturally! Try asking questions like "What's the weather like?" or "Can you search for current news?" I'll automatically detect when you need my help.
+
+**New Memory Features:**
+- "save to memory" - Store important information
+- "save notes" - Create conversation summary
+- "save as todos" - Extract actionable tasks
+- "clear context" - Start fresh conversation
+
+I can remember things for you and help organize your thoughts!`;
       
       console.log('💡 User asked for help, providing instructions');
       
@@ -419,6 +729,204 @@ app.post('/omi-webhook', async (req, res) => {
         instructions: 'Ask questions naturally or use "Hey Omi" to be explicit.',
         conversation_context: 'maintained'
       });
+    }
+    
+    // Handle memory commands
+    if (isMemoryCommand) {
+      console.log('💾 User wants to save to memory');
+      
+      try {
+        // Extract the content to save (everything before the memory command)
+        const memoryContent = fullTranscript.replace(/\b(save to memory|remember this|store information|save information|save as memory|memorize this|keep this|save this)\b/gi, '').trim();
+        
+        if (!memoryContent) {
+          return res.status(200).json({
+            message: 'What would you like me to remember? Please provide the information you want to save.',
+            error: 'No content provided for memory'
+          });
+        }
+        
+        // Use AI to categorize the memory
+        const categoryResponse = await openai.chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            { role: 'system', content: 'Categorize the following information into one of these categories: personal, work, learning, general, facts, preferences, or other. Respond with just the category name.' },
+            { role: 'user', content: memoryContent }
+          ],
+          max_tokens: 20,
+          temperature: 0.3
+        });
+        
+        const category = categoryResponse.choices[0].message.content.trim().toLowerCase();
+        
+        // Save to memory
+        const memoryId = await saveMemory(session_id, memoryContent, category);
+        
+        // Store in conversation history
+        manageConversationHistory(session_id, fullTranscript, `Saved to memory: "${memoryContent}"`);
+        
+        // Clear session transcript
+        sessionTranscripts.delete(session_id);
+        
+        return res.status(200).json({
+          message: `✅ Saved to memory: "${memoryContent}"`,
+          memory_id: memoryId,
+          category: category,
+          action: 'memory_saved'
+        });
+        
+      } catch (error) {
+        console.error('❌ Error saving to memory:', error);
+        return res.status(200).json({
+          message: 'Sorry, I had trouble saving that to memory. Please try again.',
+          error: error.message
+        });
+      }
+    }
+    
+    // Handle context clearing commands
+    if (isContextCommand) {
+      console.log('🧹 User wants to clear context');
+      
+      // Clear conversation history
+      clearConversationHistory(session_id);
+      
+      // Clear session transcript
+      sessionTranscripts.delete(session_id);
+      
+      return res.status(200).json({
+        message: '✅ Context cleared! Starting fresh conversation.',
+        action: 'context_cleared'
+      });
+    }
+    
+    // Handle notes/summary commands
+    if (isNotesCommand) {
+      console.log('📝 User wants to save notes/summary');
+      
+      try {
+        // Get conversation history for summary
+        const history = getConversationHistory(session_id);
+        
+        if (history.length === 0) {
+          return res.status(200).json({
+            message: 'No conversation to summarize. Start a conversation first!',
+            error: 'No conversation history'
+          });
+        }
+        
+        // Create conversation summary using AI
+        const summaryPrompt = `Create a concise summary of this conversation. Focus on key points, decisions made, and important information discussed. Keep it under 200 words.
+
+Conversation:
+${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`).join('\n')}`;
+
+        const summaryResponse = await openai.chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            { role: 'system', content: 'You are a helpful assistant that creates clear, concise conversation summaries.' },
+            { role: 'user', content: summaryPrompt }
+          ],
+          max_tokens: 300,
+          temperature: 0.7
+        });
+        
+        const summary = summaryResponse.choices[0].message.content;
+        
+        // Save summary to memory
+        const memoryId = await saveMemory(session_id, summary, 'notes', {
+          type: 'conversation_summary',
+          original_length: history.length
+        });
+        
+        // Store in conversation history
+        manageConversationHistory(session_id, fullTranscript, `Created notes: ${summary}`);
+        
+        // Clear session transcript
+        sessionTranscripts.delete(session_id);
+        
+        return res.status(200).json({
+          message: `✅ Notes created and saved!\n\n**Summary:**\n${summary}`,
+          memory_id: memoryId,
+          summary: summary,
+          action: 'notes_created'
+        });
+        
+      } catch (error) {
+        console.error('❌ Error creating notes:', error);
+        return res.status(200).json({
+          message: 'Sorry, I had trouble creating notes. Please try again.',
+          error: error.message
+        });
+      }
+    }
+    
+    // Handle todo list commands
+    if (isTodoCommand) {
+      console.log('📋 User wants to create todo list');
+      
+      try {
+        // Get conversation history for todo extraction
+        const history = getConversationHistory(session_id);
+        
+        if (history.length === 0) {
+          return res.status(200).json({
+            message: 'No conversation to extract todos from. Start a conversation first!',
+            error: 'No conversation history'
+          });
+        }
+        
+        // Extract todos using AI
+        const todoPrompt = `Extract actionable tasks and todos from this conversation. Format as a numbered list. Only include specific, actionable items. If no clear tasks are mentioned, respond with "No specific tasks identified."
+
+Conversation:
+${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`).join('\n')}`;
+
+        const todoResponse = await openai.chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            { role: 'system', content: 'You are a helpful assistant that extracts actionable tasks from conversations. Format as a clear numbered list.' },
+            { role: 'user', content: todoPrompt }
+          ],
+          max_tokens: 500,
+          temperature: 0.5
+        });
+        
+        const todoList = todoResponse.choices[0].message.content;
+        
+        if (todoList.toLowerCase().includes('no specific tasks')) {
+          return res.status(200).json({
+            message: 'No specific tasks were identified in this conversation. Try discussing specific actions or goals!',
+            action: 'no_todos_found'
+          });
+        }
+        
+        // Save todo list to memory
+        const memoryId = await saveMemory(session_id, todoList, 'todos', {
+          type: 'todo_list',
+          original_length: history.length
+        });
+        
+        // Store in conversation history
+        manageConversationHistory(session_id, fullTranscript, `Created todo list: ${todoList}`);
+        
+        // Clear session transcript
+        sessionTranscripts.delete(session_id);
+        
+        return res.status(200).json({
+          message: `✅ Todo list created and saved!\n\n**Tasks:**\n${todoList}`,
+          memory_id: memoryId,
+          todo_list: todoList,
+          action: 'todos_created'
+        });
+        
+      } catch (error) {
+        console.error('❌ Error creating todo list:', error);
+        return res.status(200).json({
+          message: 'Sorry, I had trouble creating the todo list. Please try again.',
+          error: error.message
+        });
+      }
     }
     
     if (!wantsAIInteraction) {
@@ -479,16 +987,35 @@ app.post('/omi-webhook', async (req, res) => {
          // Get conversation history for this session
          const history = getConversationHistory(session_id);
          
+         // Search for relevant memories
+         const relevantMemories = await searchMemories(session_id, question, 3);
+         
          // Create context-aware input for the Responses API
          let contextInput = question;
+         let contextParts = [];
+         
          if (history.length > 0) {
              // Build conversation context from history
              const contextMessages = history.map(msg => 
                  `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`
              ).join('\n\n');
              
-             contextInput = `Previous conversation:\n${contextMessages}\n\nCurrent user message: ${question}`;
+             contextParts.push(`Previous conversation:\n${contextMessages}`);
              console.log('📚 Including conversation history in context');
+         }
+         
+         if (relevantMemories.length > 0) {
+             // Add relevant memories to context
+             const memoryContext = relevantMemories.map(memory => 
+                 `- ${memory.content} (${memory.category})`
+             ).join('\n');
+             
+             contextParts.push(`Relevant memories:\n${memoryContext}`);
+             console.log('🧠 Including relevant memories in context');
+         }
+         
+         if (contextParts.length > 0) {
+             contextInput = `${contextParts.join('\n\n')}\n\nCurrent user message: ${question}`;
          }
          
          // Use the new Responses API with web search and conversation context
@@ -514,6 +1041,9 @@ app.post('/omi-webhook', async (req, res) => {
              // Get conversation history for fallback
              const history = getConversationHistory(session_id);
              
+             // Search for relevant memories
+             const relevantMemories = await searchMemories(session_id, question, 3);
+             
              // Build messages array with conversation history
              const messages = [
                  { 
@@ -526,6 +1056,19 @@ app.post('/omi-webhook', async (req, res) => {
              if (history.length > 0) {
                  messages.push(...history);
                  console.log('📚 Including conversation history in fallback');
+             }
+             
+             // Add relevant memories as context
+             if (relevantMemories.length > 0) {
+                 const memoryContext = relevantMemories.map(memory => 
+                     `- ${memory.content} (${memory.category})`
+                 ).join('\n');
+                 
+                 messages.push({
+                     role: 'system',
+                     content: `Relevant memories from previous conversations:\n${memoryContext}`
+                 });
+                 console.log('🧠 Including relevant memories in fallback');
              }
              
              // Add current user message
@@ -656,6 +1199,9 @@ app.listen(PORT, async () => {
   console.log(`🔗 Health check: http://localhost:${PORT}/health`);
   console.log(`📖 Help & instructions: http://localhost:${PORT}/help`);
   console.log(`📡 Webhook endpoint: http://localhost:${PORT}/omi-webhook`);
+  
+  // Initialize memory storage
+  await initializeMemoryStorage();
   
   // Check environment variables (Updated)
   if (!process.env.OPENAI_KEY) {
