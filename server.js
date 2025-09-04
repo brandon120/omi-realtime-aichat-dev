@@ -42,28 +42,47 @@ async function initializeMemoryStorage() {
   try {
     // Check if ChromaDB URL is provided
     const chromaUrl = process.env.CHROMA_URL || "http://localhost:8000";
+    const chromaAuthToken = process.env.CHROMA_AUTH_TOKEN;
+    
+    console.log('🔗 Connecting to ChromaDB at:', chromaUrl);
+    console.log('🔑 Authentication:', chromaAuthToken ? 'Enabled' : 'Disabled');
     
     // Try to connect to ChromaDB with a timeout
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
     
     try {
+      const headers = {};
+      if (chromaAuthToken) {
+        headers['Authorization'] = `Bearer ${chromaAuthToken}`;
+      }
+      
       const response = await fetch(`${chromaUrl}/api/v1/heartbeat`, {
-        signal: controller.signal
+        signal: controller.signal,
+        headers: headers
       });
       clearTimeout(timeoutId);
       
       if (!response.ok) {
         throw new Error(`ChromaDB server responded with status: ${response.status}`);
       }
+      
+      console.log('✅ ChromaDB heartbeat successful');
     } catch (fetchError) {
       clearTimeout(timeoutId);
       throw new Error(`ChromaDB server not available at ${chromaUrl}. Please start ChromaDB server.`);
     }
     
-    chromaClient = new ChromaClient({
-      path: chromaUrl
-    });
+    // Configure ChromaDB client with authentication if needed
+    const clientConfig = { path: chromaUrl };
+    if (chromaAuthToken) {
+      clientConfig.auth = {
+        provider: 'token',
+        credentials: chromaAuthToken
+      };
+    }
+    
+    chromaClient = new ChromaClient(clientConfig);
     
     // Create or get the memories collection
     memoriesCollection = await chromaClient.getOrCreateCollection({
@@ -72,6 +91,7 @@ async function initializeMemoryStorage() {
     });
     
     console.log('✅ Memory storage initialized with ChromaDB');
+    console.log('📊 Collection name: omi_memories');
   } catch (error) {
     console.error('❌ Failed to initialize ChromaDB:', error.message);
     console.log('💡 To start ChromaDB server:');
