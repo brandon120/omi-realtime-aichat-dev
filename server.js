@@ -86,18 +86,32 @@ async function initializeMemoryStorage() {
     
     // Create or get the memories collection with intelligent migration
     // Use OpenAI embedding function from ChromaDB package
-    let embeddingFunction;
-    try {
-      const { OpenAIEmbeddingFunction } = require('chromadb');
-      embeddingFunction = new OpenAIEmbeddingFunction({
-        openai_api_key: process.env.OPENAI_KEY,
-        openai_model: "text-embedding-3-small"
-      });
-      console.log('✅ Using OpenAIEmbeddingFunction from chromadb package');
-    } catch (error) {
-      console.warn('⚠️ Failed to load OpenAIEmbeddingFunction:', error.message);
-      console.log('📝 Note: This requires a valid OPENAI_KEY environment variable');
-      embeddingFunction = null;
+    let embeddingFunction = null;
+    
+    if (!process.env.OPENAI_KEY || process.env.OPENAI_KEY.trim() === '') {
+      console.warn('⚠️ OPENAI_KEY not found or empty, creating collection without embedding function');
+    } else {
+      try {
+        const { OpenAIEmbeddingFunction } = require('chromadb');
+        embeddingFunction = new OpenAIEmbeddingFunction({
+          openai_api_key: process.env.OPENAI_KEY,
+          openai_model: "text-embedding-3-small"
+        });
+        
+        // Test the embedding function to make sure it works
+        try {
+          await embeddingFunction.generate(['test']);
+          console.log('✅ Using OpenAIEmbeddingFunction from chromadb package');
+        } catch (testError) {
+          console.warn('⚠️ OpenAIEmbeddingFunction test failed:', testError.message);
+          console.log('📝 Falling back to collection without embedding function');
+          embeddingFunction = null;
+        }
+      } catch (error) {
+        console.warn('⚠️ Failed to load OpenAIEmbeddingFunction:', error.message);
+        console.log('📝 Note: This requires a valid OPENAI_KEY environment variable');
+        embeddingFunction = null;
+      }
     }
     
     try {
@@ -156,7 +170,7 @@ async function initializeMemoryStorage() {
             console.log(`✅ Restored ${existingData.length} memories`);
           }
           
-          console.log('📚 Collection migrated with OpenAI embedding function');
+          console.log(embeddingFunction ? '📚 Collection migrated with OpenAI embedding function' : '📚 Collection migrated without embedding function');
         } else {
           throw queryError;
         }
@@ -172,7 +186,7 @@ async function initializeMemoryStorage() {
             collectionConfig.embeddingFunction = embeddingFunction;
           }
           memoriesCollection = await chromaClient.createCollection(collectionConfig);
-        console.log('📚 Created new collection with OpenAI embedding function');
+        console.log(embeddingFunction ? '📚 Created new collection with OpenAI embedding function' : '📚 Created new collection without embedding function');
       } else {
         throw error;
       }
