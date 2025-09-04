@@ -800,7 +800,8 @@ app.post('/omi-webhook', async (req, res) => {
     // Todo list keywords
     const todoKeywords = [
       'save as todos', 'create todo list', 'extract tasks', 'make todo list',
-      'save as tasks', 'create tasks', 'todo list', 'task list'
+      'save as tasks', 'create tasks', 'todo list', 'task list', 'create a todo',
+      'create todo', 'make a todo', 'extract todo', 'todo', 'todos'
     ];
     
     // Context management keywords
@@ -828,6 +829,17 @@ app.post('/omi-webhook', async (req, res) => {
     const isContextCommand = contextKeywords.some(keyword => 
       transcriptLower.includes(keyword)
     );
+    
+    // Debug logging for command detection
+    if (isTodoCommand || isMemoryCommand || isNotesCommand || isContextCommand) {
+      console.log('🔍 Command detected:', {
+        transcript: fullTranscript.substring(0, 100) + '...',
+        isMemoryCommand,
+        isNotesCommand,
+        isTodoCommand,
+        isContextCommand
+      });
+    }
     
     // Check for duplicate content to prevent processing the same transcript multiple times
     const contentHash = Buffer.from(fullTranscript).toString('base64');
