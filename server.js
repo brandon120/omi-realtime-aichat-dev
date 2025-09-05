@@ -1558,7 +1558,7 @@ app.post('/omi-webhook', async (req, res) => {
       const contentHash = Buffer.from(fullTranscript).toString('base64');
       if (processedContent.has(session_id) && processedContent.get(session_id).includes(contentHash)) {
         console.log('⏭️ Skipping duplicate transcript content:', fullTranscript);
-        return res.status(200).json({ message: 'Content already processed' });
+        return res.status(200).json({ status: 'Content already processed' });
       }
       
       // Track this content as processed
@@ -1593,7 +1593,7 @@ I can remember things for you and help organize your thoughts!`;
       sessionTranscripts.delete(session_id);
       console.log('🧹 Cleared session transcript for help request:', session_id);
       return res.status(200).json({ 
-        message: 'You can talk to me naturally! Try asking questions or giving commands.',
+        status: 'You can talk to me naturally! Try asking questions or giving commands.',
         help_response: helpMessage,
         instructions: 'Ask questions naturally or use "Hey Omi" to be explicit.',
         conversation_context: 'maintained'
@@ -1871,7 +1871,7 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
     if (!question) {
       console.log('⏭️ Skipping transcript - no question after "hey omi"');
       return res.status(200).json({ 
-        message: 'Transcript ignored - no question provided' 
+        status: 'Transcript ignored - no question provided' 
       });
     }
     
@@ -2055,10 +2055,9 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
          // Store conversation history even when rate limited
          manageConversationHistory(session_id, question, aiResponse);
          
-         // Still return the AI response, but note the rate limit
+         // Still return the AI response, but note the rate limit (without message field to prevent duplicate notifications)
          res.status(200).json({
            success: true,
-           message: aiResponse,
            question: question,
            ai_response: aiResponse,
            omi_response: null,
@@ -2092,10 +2091,9 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
      const requestDuration = Date.now() - requestStartTime;
      updatePerformanceMetrics('request', requestDuration);
      
-     // Return success response
+     // Return success response (without message field to prevent duplicate notifications)
      res.status(200).json({
        success: true,
-       message: aiResponse,
        question: question,
        ai_response: aiResponse,
        omi_response: omiResponse,
