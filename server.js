@@ -1686,8 +1686,15 @@ I can remember things for you, organize your thoughts, and help you stay product
         const memoryContent = fullTranscript.replace(/\b(save to memory|remember this|store information|save information|save as memory|memorize this|keep this|save this)\b/gi, '').trim();
         
         if (!memoryContent) {
+          // Send notification to user
+          try {
+            await sendOmiNotification(session_id, 'What would you like me to remember? Please provide the information you want to save.');
+            console.log('📤 Successfully sent no memory content notification to Omi');
+          } catch (notificationError) {
+            console.warn('⚠️ Failed to send no memory content notification:', notificationError.message);
+          }
+          
           return res.status(200).json({
-            message: 'What would you like me to remember? Please provide the information you want to save.',
             error: 'No content provided for memory'
           });
         }
@@ -1742,8 +1749,15 @@ I can remember things for you, organize your thoughts, and help you stay product
             });
         } catch (memoryError) {
             console.warn('⚠️ Failed to save memory:', memoryError.message);
+            // Send error notification to user
+            try {
+              await sendOmiNotification(session_id, 'Sorry, I had trouble saving that to memory. Please try again.');
+              console.log('📤 Successfully sent memory save error notification to Omi');
+            } catch (notificationError) {
+              console.warn('⚠️ Failed to send memory save error notification:', notificationError.message);
+            }
+            
             return res.status(200).json({
-                message: 'Sorry, I had trouble saving that to memory. Please try again.',
                 error: memoryError.message
             });
         }
@@ -1754,8 +1768,15 @@ I can remember things for you, organize your thoughts, and help you stay product
         // Clear session transcript
         sessionTranscripts.delete(session_id);
         
+        // Send notification to user
+        try {
+          await sendOmiNotification(session_id, `✅ Saved to memory: "${memoryContent}"`);
+          console.log('📤 Successfully sent memory notification to Omi');
+        } catch (notificationError) {
+          console.warn('⚠️ Failed to send memory notification:', notificationError.message);
+        }
+        
         return res.status(200).json({
-          message: `✅ Saved to memory: "${memoryContent}"`,
           memory_id: memoryId,
           category: category,
           tags: tags,
@@ -1766,8 +1787,15 @@ I can remember things for you, organize your thoughts, and help you stay product
         
       } catch (error) {
         console.error('❌ Error saving to memory:', error);
+        // Send error notification to user
+        try {
+          await sendOmiNotification(session_id, 'Sorry, I had trouble saving that to memory. Please try again.');
+          console.log('📤 Successfully sent memory error notification to Omi');
+        } catch (notificationError) {
+          console.warn('⚠️ Failed to send memory error notification:', notificationError.message);
+        }
+        
         return res.status(200).json({
-          message: 'Sorry, I had trouble saving that to memory. Please try again.',
           error: error.message
         });
       }
@@ -1792,8 +1820,15 @@ I can remember things for you, organize your thoughts, and help you stay product
           // Clear pending confirmation
           pendingConfirmations.delete(session_id);
           
+          // Send notification to user
+          try {
+            await sendOmiNotification(session_id, '✅ Context cleared! Starting fresh conversation.');
+            console.log('📤 Successfully sent context cleared notification to Omi');
+          } catch (notificationError) {
+            console.warn('⚠️ Failed to send context cleared notification:', notificationError.message);
+          }
+          
           return res.status(200).json({
-            message: '✅ Context cleared! Starting fresh conversation.',
             action: 'context_cleared'
           });
         } else if (isCancellation) {
@@ -1801,14 +1836,28 @@ I can remember things for you, organize your thoughts, and help you stay product
           console.log('❌ User cancelled context clearing');
           pendingConfirmations.delete(session_id);
           
+          // Send notification to user
+          try {
+            await sendOmiNotification(session_id, '❌ Context clearing cancelled. Your conversation history is preserved.');
+            console.log('📤 Successfully sent context clear cancelled notification to Omi');
+          } catch (notificationError) {
+            console.warn('⚠️ Failed to send context clear cancelled notification:', notificationError.message);
+          }
+          
           return res.status(200).json({
-            message: '❌ Context clearing cancelled. Your conversation history is preserved.',
             action: 'context_clear_cancelled'
           });
         } else {
           // User didn't give clear confirmation/cancellation
+          // Send notification to user
+          try {
+            await sendOmiNotification(session_id, 'Please confirm: Are you sure you want to clear the conversation context? This will delete all conversation history. Say "yes" to confirm or "no" to cancel.');
+            console.log('📤 Successfully sent context confirmation request notification to Omi');
+          } catch (notificationError) {
+            console.warn('⚠️ Failed to send context confirmation request notification:', notificationError.message);
+          }
+          
           return res.status(200).json({
-            message: 'Please confirm: Are you sure you want to clear the conversation context? This will delete all conversation history. Say "yes" to confirm or "no" to cancel.',
             action: 'awaiting_confirmation'
           });
         }
@@ -1818,8 +1867,15 @@ I can remember things for you, organize your thoughts, and help you stay product
         
         if (historyLength === 0) {
           // No conversation to clear
+          // Send notification to user
+          try {
+            await sendOmiNotification(session_id, 'There\'s no conversation context to clear. You\'re already starting fresh!');
+            console.log('📤 Successfully sent no context to clear notification to Omi');
+          } catch (notificationError) {
+            console.warn('⚠️ Failed to send no context to clear notification:', notificationError.message);
+          }
+          
           return res.status(200).json({
-            message: 'There\'s no conversation context to clear. You\'re already starting fresh!',
             action: 'no_context_to_clear'
           });
         }
@@ -1830,8 +1886,15 @@ I can remember things for you, organize your thoughts, and help you stay product
           timestamp: Date.now()
         });
         
+        // Send notification to user
+        try {
+          await sendOmiNotification(session_id, `⚠️ Are you sure you want to clear the conversation context? This will delete ${historyLength} messages from our conversation history and cannot be undone. Say "yes" to confirm or "no" to cancel.`);
+          console.log('📤 Successfully sent context clear confirmation notification to Omi');
+        } catch (notificationError) {
+          console.warn('⚠️ Failed to send context clear confirmation notification:', notificationError.message);
+        }
+        
         return res.status(200).json({
-          message: `⚠️ Are you sure you want to clear the conversation context? This will delete ${historyLength} messages from our conversation history and cannot be undone. Say "yes" to confirm or "no" to cancel.`,
           action: 'awaiting_confirmation',
           conversation_length: historyLength
         });
@@ -1847,8 +1910,15 @@ I can remember things for you, organize your thoughts, and help you stay product
         const history = getConversationHistory(session_id);
         
         if (history.length === 0) {
+          // Send notification to user
+          try {
+            await sendOmiNotification(session_id, 'No conversation to summarize. Start a conversation first!');
+            console.log('📤 Successfully sent no conversation to summarize notification to Omi');
+          } catch (notificationError) {
+            console.warn('⚠️ Failed to send no conversation to summarize notification:', notificationError.message);
+          }
+          
           return res.status(200).json({
-            message: 'No conversation to summarize. Start a conversation first!',
             error: 'No conversation history'
           });
         }
@@ -1898,8 +1968,15 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
             });
         } catch (memoryError) {
             console.warn('⚠️ Failed to save notes to memory:', memoryError.message);
+            // Send error notification to user
+            try {
+              await sendOmiNotification(session_id, 'Sorry, I had trouble saving the notes. Please try again.');
+              console.log('📤 Successfully sent notes save error notification to Omi');
+            } catch (notificationError) {
+              console.warn('⚠️ Failed to send notes save error notification:', notificationError.message);
+            }
+            
             return res.status(200).json({
-                message: 'Sorry, I had trouble saving the notes. Please try again.',
                 error: memoryError.message
             });
         }
@@ -1910,8 +1987,15 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
         // Clear session transcript
         sessionTranscripts.delete(session_id);
         
+        // Send notification to user
+        try {
+          await sendOmiNotification(session_id, `✅ Notes created and saved!\n\n**Summary:**\n${summary}`);
+          console.log('📤 Successfully sent notes created notification to Omi');
+        } catch (notificationError) {
+          console.warn('⚠️ Failed to send notes created notification:', notificationError.message);
+        }
+        
         return res.status(200).json({
-          message: `✅ Notes created and saved!\n\n**Summary:**\n${summary}`,
           memory_id: memoryId,
           summary: summary,
           action: 'notes_created'
@@ -1919,8 +2003,15 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
         
       } catch (error) {
         console.error('❌ Error creating notes:', error);
+        // Send error notification to user
+        try {
+          await sendOmiNotification(session_id, 'Sorry, I had trouble creating notes. Please try again.');
+          console.log('📤 Successfully sent notes error notification to Omi');
+        } catch (notificationError) {
+          console.warn('⚠️ Failed to send notes error notification:', notificationError.message);
+        }
+        
         return res.status(200).json({
-          message: 'Sorry, I had trouble creating notes. Please try again.',
           error: error.message
         });
       }
@@ -1935,8 +2026,15 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
         const history = getConversationHistory(session_id);
         
         if (history.length === 0) {
+          // Send notification to user
+          try {
+            await sendOmiNotification(session_id, 'No conversation to extract todos from. Start a conversation first!');
+            console.log('📤 Successfully sent no conversation for todos notification to Omi');
+          } catch (notificationError) {
+            console.warn('⚠️ Failed to send no conversation for todos notification:', notificationError.message);
+          }
+          
           return res.status(200).json({
-            message: 'No conversation to extract todos from. Start a conversation first!',
             error: 'No conversation history'
           });
         }
@@ -1970,8 +2068,15 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
         const todoList = todoResponse.choices[0].message.content;
         
         if (todoList.toLowerCase().includes('no specific tasks')) {
+          // Send notification to user
+          try {
+            await sendOmiNotification(session_id, 'No specific tasks were identified in this conversation. Try discussing specific actions or goals!');
+            console.log('📤 Successfully sent no todos found notification to Omi');
+          } catch (notificationError) {
+            console.warn('⚠️ Failed to send no todos found notification:', notificationError.message);
+          }
+          
           return res.status(200).json({
-            message: 'No specific tasks were identified in this conversation. Try discussing specific actions or goals!',
             action: 'no_todos_found'
           });
         }
@@ -1985,8 +2090,15 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
             });
         } catch (memoryError) {
             console.warn('⚠️ Failed to save todos to memory:', memoryError.message);
+            // Send error notification to user
+            try {
+              await sendOmiNotification(session_id, 'Sorry, I had trouble saving the todo list. Please try again.');
+              console.log('📤 Successfully sent todos save error notification to Omi');
+            } catch (notificationError) {
+              console.warn('⚠️ Failed to send todos save error notification:', notificationError.message);
+            }
+            
             return res.status(200).json({
-                message: 'Sorry, I had trouble saving the todo list. Please try again.',
                 error: memoryError.message
             });
         }
@@ -1997,8 +2109,15 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
         // Clear session transcript
         sessionTranscripts.delete(session_id);
         
+        // Send notification to user
+        try {
+          await sendOmiNotification(session_id, `✅ Todo list created and saved!\n\n**Tasks:**\n${todoList}`);
+          console.log('📤 Successfully sent todos created notification to Omi');
+        } catch (notificationError) {
+          console.warn('⚠️ Failed to send todos created notification:', notificationError.message);
+        }
+        
         return res.status(200).json({
-          message: `✅ Todo list created and saved!\n\n**Tasks:**\n${todoList}`,
           memory_id: memoryId,
           todo_list: todoList,
           action: 'todos_created'
@@ -2006,8 +2125,15 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
         
       } catch (error) {
         console.error('❌ Error creating todo list:', error);
+        // Send error notification to user
+        try {
+          await sendOmiNotification(session_id, 'Sorry, I had trouble creating the todo list. Please try again.');
+          console.log('📤 Successfully sent todos error notification to Omi');
+        } catch (notificationError) {
+          console.warn('⚠️ Failed to send todos error notification:', notificationError.message);
+        }
+        
         return res.status(200).json({
-          message: 'Sorry, I had trouble creating the todo list. Please try again.',
           error: error.message
         });
       }
