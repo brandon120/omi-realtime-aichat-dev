@@ -3,6 +3,7 @@ const https = require('https');
 const OpenAI = require('openai');
 const { ChromaClient } = require('chromadb');
 const { v4: uuidv4 } = require('uuid');
+const PgVectorMemoryStorage = require('./pgvector-memory-storage');
 require('dotenv').config();
 
 /**
@@ -39,6 +40,10 @@ const memoryIndex = new Map(); // Fast lookup index by user and category
 let chromaClient = null;
 let memoriesCollection = null;
 let isChromaDBInitialized = false;
+
+// PgVector storage instance
+let pgVectorStorage = null;
+let isPgVectorInitialized = false;
 
 // Memory storage configuration
 const MEMORY_CONFIG = {
@@ -77,10 +82,43 @@ function isChromaDBReady() {
   return isChromaDBInitialized && chromaClient && memoriesCollection;
 }
 
-// Initialize ChromaDB for vector storage
+/**
+ * Check if PgVector storage is properly initialized and ready
+ * @returns {boolean} True if PgVector storage is ready
+ */
+function isPgVectorReady() {
+  return isPgVectorInitialized && pgVectorStorage && pgVectorStorage.isReady();
+}
+
+/**
+ * Check if any vector storage is ready (ChromaDB or PgVector)
+ * @returns {boolean} True if any vector storage is ready
+ */
+function isVectorStorageReady() {
+  return isChromaDBReady() || isPgVectorReady();
+}
+
+// Initialize memory storage (PgVector preferred, ChromaDB fallback)
 async function initializeMemoryStorage() {
+  const storageType = process.env.VECTOR_STORAGE_TYPE || 'pgvector';
+  
+  // Try PgVector first (recommended for Railway)
+  if (storageType === 'pgvector' || !process.env.CHROMA_URL) {
+    try {
+      console.log('🔗 Initializing PgVector storage...');
+      pgVectorStorage = new PgVectorMemoryStorage();
+      await pgVectorStorage.initialize();
+      isPgVectorInitialized = true;
+      console.log('✅ Memory storage initialized with PgVector');
+      return;
+    } catch (error) {
+      console.error('❌ Failed to initialize PgVector:', error.message);
+      console.log('🔄 Falling back to ChromaDB...');
+    }
+  }
+  
+  // Fallback to ChromaDB if PgVector fails or if explicitly requested
   try {
-    // Check if ChromaDB URL is provided
     const chromaUrl = process.env.CHROMA_URL || "http://localhost:8000";
     const chromaAuthToken = process.env.CHROMA_AUTH_TOKEN;
     
@@ -215,8 +253,8 @@ async function initializeMemoryStorage() {
     // Set initialization status to false
     isChromaDBInitialized = false;
     
-    // Don't throw error - allow server to start without ChromaDB
-    console.warn('⚠️ Server will continue without ChromaDB features');
+    // Don't throw error - allow server to start without vector storage
+    console.warn('⚠️ Server will continue without vector storage features');
   }
 }
 
@@ -598,9 +636,9 @@ async function saveMemory(userId, content, category = 'general', metadata = {}) 
         // Generate and cache embedding asynchronously (non-blocking)
         generateEmbeddingAsync(content, memoryId);
 
-        // Store in ChromaDB asynchronously (non-blocking backup)
-        if (isChromaDBReady()) {
-            storeInChromaDBAsync(memoryData, content);
+        // Store in vector storage asynchronously (non-blocking backup)
+        if (isVectorStorageReady()) {
+            storeInVectorStorageAsync(memoryData, content);
         }
 
         console.log(`💾 Saved memory for user ${userId}: ${content.substring(0, 50)}...`);
@@ -648,23 +686,32 @@ async function generateEmbeddingAsync(content, memoryId) {
 }
 
 /**
- * Store memory in ChromaDB asynchronously (backup)
+ * Store memory in vector storage asynchronously (backup)
  * @param {object} memoryData - Memory data
  * @param {string} content - Memory content
  */
-async function storeInChromaDBAsync(memoryData, content) {
+async function storeInVectorStorageAsync(memoryData, content) {
     try {
-        const embedding = await generateEmbeddingAsync(content, memoryData.id);
-        if (embedding) {
-            await memoriesCollection.add({
-                ids: [memoryData.id],
-                documents: [content],
-                embeddings: [embedding],
-                metadatas: [memoryData]
-            });
+        // Try PgVector first
+        if (isPgVectorReady()) {
+            await pgVectorStorage.addMemory(memoryData);
+            return;
+        }
+        
+        // Fallback to ChromaDB
+        if (isChromaDBReady()) {
+            const embedding = await generateEmbeddingAsync(content, memoryData.id);
+            if (embedding) {
+                await memoriesCollection.add({
+                    ids: [memoryData.id],
+                    documents: [content],
+                    embeddings: [embedding],
+                    metadatas: [memoryData]
+                });
+            }
         }
     } catch (error) {
-        console.warn('⚠️ Failed to store in ChromaDB:', error.message);
+        console.warn('⚠️ Failed to store in vector storage:', error.message);
     }
 }
 
@@ -718,6 +765,12 @@ async function generateBatchEmbeddings(texts) {
  */
 async function searchMemories(userId, query, limit = 5) {
     try {
+        // Try PgVector first for semantic search
+        if (isPgVectorReady()) {
+            console.log('🔍 Using PgVector for semantic search');
+            return await pgVectorStorage.searchMemories(userId, query, limit);
+        }
+
         // First try local search for fast results
         const localResults = searchMemoriesLocally(userId, query, limit);
         if (localResults.length > 0) {
@@ -826,8 +879,17 @@ async function searchMemoriesChromaDB(userId, query, limit = 5) {
  * @returns {Promise<Array>} Array of user's memories
  */
 async function getUserMemories(userId) {
+    // Try PgVector first, then ChromaDB, then local fallback
+    if (isPgVectorReady()) {
+        const result = await pgVectorStorage.getAllMemories(userId, { limit: 1000 });
+        return result.memories;
+    }
+    
     if (!isChromaDBReady()) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
+        // Fallback to local storage if no vector storage is available
+        console.warn('⚠️ No vector storage available, using local memory fallback');
+        const result = await getLocalMemories(userId, { limit: 1000 });
+        return result.memories;
     }
 
     try {
@@ -848,8 +910,13 @@ async function getUserMemories(userId) {
  * @returns {Promise<boolean>} Success status
  */
 async function deleteMemory(memoryId) {
+    // Try PgVector first, then ChromaDB
+    if (isPgVectorReady()) {
+        return await pgVectorStorage.deleteMemory(memoryId);
+    }
+    
     if (!isChromaDBReady()) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
+        throw new Error('Memory storage not initialized. Vector storage is required.');
     }
 
     try {
@@ -952,8 +1019,15 @@ async function getLocalMemories(userId, options = {}) {
  * @returns {Promise<Object>} Paginated memories with metadata
  */
 async function getAllMemories(userId, options = {}) {
+    // Try PgVector first, then ChromaDB, then local fallback
+    if (isPgVectorReady()) {
+        return await pgVectorStorage.getAllMemories(userId, options);
+    }
+    
     if (!isChromaDBReady()) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
+        // Fallback to local storage if no vector storage is available
+        console.warn('⚠️ No vector storage available, using local memory fallback');
+        return await getLocalMemories(userId, options);
     }
     
     const {
@@ -1021,8 +1095,13 @@ async function getAllMemories(userId, options = {}) {
  * @returns {Promise<Object|null>} Memory object or null if not found
  */
 async function getMemoryById(memoryId) {
+    // Try PgVector first, then ChromaDB
+    if (isPgVectorReady()) {
+        return await pgVectorStorage.getMemoryById(memoryId);
+    }
+    
     if (!isChromaDBReady()) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
+        throw new Error('Memory storage not initialized. Vector storage is required.');
     }
     
     try {
@@ -1051,8 +1130,13 @@ async function getMemoryById(memoryId) {
  * @returns {Promise<Array>} Array of unique categories
  */
 async function getMemoryCategories(userId) {
+    // Try PgVector first, then ChromaDB
+    if (isPgVectorReady()) {
+        return await pgVectorStorage.getMemoryCategories(userId);
+    }
+    
     if (!isChromaDBReady()) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
+        throw new Error('Memory storage not initialized. Vector storage is required.');
     }
     
     try {
@@ -1082,8 +1166,13 @@ async function getMemoryCategories(userId) {
  * @returns {Promise<boolean>} Success status
  */
 async function updateMemory(memoryId, newContent, newMetadata = {}) {
+    // Try PgVector first, then ChromaDB
+    if (isPgVectorReady()) {
+        return await pgVectorStorage.updateMemory(memoryId, newContent, newMetadata);
+    }
+    
     if (!isChromaDBReady()) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
+        throw new Error('Memory storage not initialized. Vector storage is required.');
     }
     
     try {
@@ -1122,8 +1211,13 @@ async function updateMemory(memoryId, newContent, newMetadata = {}) {
  * @returns {Promise<Array>} Search results
  */
 async function advancedMemorySearch(userId, query, options = {}) {
+    // Try PgVector first, then ChromaDB
+    if (isPgVectorReady()) {
+        return await pgVectorStorage.searchMemories(userId, query, options.limit || 10);
+    }
+    
     if (!isChromaDBReady()) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
+        throw new Error('Memory storage not initialized. Vector storage is required.');
     }
     
     const {
@@ -1189,6 +1283,8 @@ app.get('/debug', (req, res) => {
       omi_app_secret: process.env.OMI_APP_SECRET ? 'SET' : 'NOT_SET'
     },
     memory_status: {
+      storage_type: isPgVectorReady() ? 'pgvector' : (isChromaDBReady() ? 'chromadb' : 'local_fallback'),
+      pgvector_ready: isPgVectorReady(),
       chroma_client: chromaClient ? 'initialized' : 'not_initialized',
       memories_collection: memoriesCollection ? 'ready' : 'not_ready',
       memory_storage_size: memoryStorage.size
@@ -1741,14 +1837,14 @@ app.get('/memories/:userId/stats', async (req, res) => {
       monthly_breakdown: monthlyCounts,
       most_common_category: Object.keys(categories).reduce((a, b) => categories[a] > categories[b] ? a : b, 'uncategorized'),
       most_common_type: Object.keys(typeCounts).reduce((a, b) => typeCounts[a] > typeCounts[b] ? a : b, 'memory'),
-      storage_type: isChromaDBReady() ? 'chromadb' : 'local_fallback'
+      storage_type: isPgVectorReady() ? 'pgvector' : (isChromaDBReady() ? 'chromadb' : 'local_fallback')
     });
   } catch (error) {
     console.error('❌ Error getting memory statistics:', error);
     res.status(500).json({
       error: 'Failed to get memory statistics',
       message: error.message,
-      storage_type: isChromaDBReady() ? 'chromadb' : 'local_fallback'
+      storage_type: isPgVectorReady() ? 'pgvector' : (isChromaDBReady() ? 'chromadb' : 'local_fallback')
     });
   }
 });
