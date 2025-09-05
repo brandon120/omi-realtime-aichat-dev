@@ -157,6 +157,17 @@ async function sendOmiNotification(userId, message) {
     if (!appId) throw new Error("OMI_APP_ID not set");
     if (!appSecret) throw new Error("OMI_APP_SECRET not set");
 
+    // Validate message content
+    if (!message || typeof message !== 'string') {
+        throw new Error("Message is required and must be a string");
+    }
+
+    // Truncate message if too long (safety measure)
+    const maxMessageLength = 4000; // Leave room for JSON overhead
+    const truncatedMessage = message.length > maxMessageLength 
+        ? message.substring(0, maxMessageLength) + '...' 
+        : message;
+
     // Check rate limit for this user
     const now = Date.now();
     const userHistory = notificationHistory.get(userId) || [];
@@ -174,14 +185,29 @@ async function sendOmiNotification(userId, message) {
         throw new Error(`Rate limit exceeded. Maximum ${MAX_NOTIFICATIONS_PER_HOUR} notifications per hour. Try again in ${minutesUntilReset} minutes.`);
     }
 
+    // Prepare request body
+    const requestBody = JSON.stringify({
+        uid: userId,
+        message: truncatedMessage
+    });
+
+    // Log notification details for debugging
+    console.log('📤 Sending notification:', {
+        userId: userId,
+        messageLength: truncatedMessage.length,
+        originalLength: message.length,
+        truncated: message.length > maxMessageLength,
+        messagePreview: truncatedMessage.substring(0, 100) + (truncatedMessage.length > 100 ? '...' : '')
+    });
+
     const options = {
         hostname: 'api.omi.me',
-        path: `/v2/integrations/${appId}/notification?uid=${encodeURIComponent(userId)}&message=${encodeURIComponent(message)}`,
+        path: `/v2/integrations/${appId}/notification`,
         method: 'POST',
         headers: {
             'Authorization': `Bearer ${appSecret}`,
             'Content-Type': 'application/json',
-            'Content-Length': 0
+            'Content-Length': Buffer.byteLength(requestBody)
         }
     };
 
@@ -190,6 +216,13 @@ async function sendOmiNotification(userId, message) {
             let data = '';
             res.on('data', chunk => data += chunk);
             res.on('end', () => {
+                console.log('📥 Omi API response:', {
+                    statusCode: res.statusCode,
+                    headers: res.headers,
+                    dataLength: data.length,
+                    dataPreview: data.substring(0, 200) + (data.length > 200 ? '...' : '')
+                });
+                
                 if (res.statusCode >= 200 && res.statusCode < 300) {
                     try {
                         // Update rate limit tracking
@@ -198,8 +231,11 @@ async function sendOmiNotification(userId, message) {
                         }
                         notificationHistory.get(userId).push(now);
                         
-                        resolve(data ? JSON.parse(data) : {});
+                        const responseData = data ? JSON.parse(data) : {};
+                        console.log('✅ Notification sent successfully:', responseData);
+                        resolve(responseData);
                     } catch (e) {
+                        console.warn('⚠️ Failed to parse Omi API response:', e.message, 'Raw data:', data);
                         resolve({ raw: data });
                     }
                 } else if (res.statusCode === 429) {
@@ -209,13 +245,26 @@ async function sendOmiNotification(userId, message) {
                     }
                     notificationHistory.get(userId).push(now);
                     
+                    console.warn('⚠️ Rate limit exceeded for user:', userId);
                     reject(new Error(`Rate limit exceeded. Maximum ${MAX_NOTIFICATIONS_PER_HOUR} notifications per hour.`));
                 } else {
-                    reject(new Error(`API Error (${res.statusCode}): ${data}`));
+                    console.error('❌ Omi API error:', res.statusCode, data);
+                    
+                    // If the API doesn't support POST body, try fallback to URL parameters
+                    if (res.statusCode === 400 && data.includes('unsupported') || data.includes('invalid')) {
+                        console.log('🔄 Attempting fallback to URL parameter method...');
+                        // This would need to be implemented as a separate fallback call
+                        reject(new Error(`API Error (${res.statusCode}): ${data}. Consider using URL parameter fallback.`));
+                    } else {
+                        reject(new Error(`API Error (${res.statusCode}): ${data}`));
+                    }
                 }
             });
         });
         req.on('error', reject);
+        
+        // Write the request body
+        req.write(requestBody);
         req.end();
     });
 }
