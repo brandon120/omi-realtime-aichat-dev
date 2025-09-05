@@ -32,10 +32,41 @@ const conversationHistory = new Map();
 // Track processed content to prevent duplicate notifications
 const processedContent = new Map();
 
-// Memory storage for vector-based semantic search
+// Enhanced memory storage with local caching and efficient search
 const memoryStorage = new Map(); // In-memory cache for quick access
+const embeddingCache = new Map(); // Cache for embeddings to avoid regeneration
+const memoryIndex = new Map(); // Fast lookup index by user and category
 let chromaClient = null;
 let memoriesCollection = null;
+
+// Memory storage configuration
+const MEMORY_CONFIG = {
+  MAX_MEMORIES_PER_USER: 1000,
+  MAX_EMBEDDING_CACHE_SIZE: 10000,
+  BATCH_EMBEDDING_SIZE: 10,
+  MEMORY_CLEANUP_INTERVAL: 30 * 60 * 1000, // 30 minutes
+  SIMPLE_QUESTION_THRESHOLD: 50, // characters
+  MEMORY_SEARCH_THRESHOLD: 3 // minimum conversation length to search memories
+};
+
+// Performance monitoring
+const performanceMetrics = {
+  totalRequests: 0,
+  averageResponseTime: 0,
+  memorySearchCount: 0,
+  embeddingGenerationCount: 0,
+  cacheHits: 0,
+  cacheMisses: 0,
+  lastCleanup: Date.now()
+};
+
+// Session management configuration
+const SESSION_CONFIG = {
+  MAX_SESSION_AGE: 5 * 60 * 1000, // 5 minutes
+  MAX_CONVERSATION_AGE: 30 * 60 * 1000, // 30 minutes
+  CLEANUP_INTERVAL: 2 * 60 * 1000, // 2 minutes
+  MAX_SESSIONS: 1000
+};
 
 // Initialize ChromaDB for vector storage
 async function initializeMemoryStorage() {
@@ -298,7 +329,7 @@ function getRateLimitStatus(userId) {
 }
 
 /**
- * Manages conversation history for a session with token limit handling
+ * Manages conversation history for a session with optimized token handling
  * @param {string} sessionId - The session ID
  * @param {string} userMessage - The user's message
  * @param {string} aiResponse - The AI's response
@@ -310,29 +341,71 @@ function manageConversationHistory(sessionId, userMessage, aiResponse) {
     
     // Add the new exchange to history
     history.push(
-        { role: 'user', content: userMessage },
-        { role: 'assistant', content: aiResponse }
+        { role: 'user', content: userMessage, timestamp: Date.now() },
+        { role: 'assistant', content: aiResponse, timestamp: Date.now() }
     );
     
-    // Estimate tokens (rough approximation: 1 token ≈ 4 characters)
-    const estimatedTokens = history.reduce((total, msg) => total + Math.ceil(msg.content.length / 4), 0);
-    
-    // If we're approaching token limits, keep only recent messages
-    // GPT-4o has ~128k context, but we'll be conservative and limit to ~50k tokens
-    const MAX_TOKENS = 50000;
-    if (estimatedTokens > MAX_TOKENS) {
-        // Keep the system message and the most recent exchanges
-        const systemMessage = history.find(msg => msg.role === 'system');
-        const recentMessages = history.filter(msg => msg.role !== 'system').slice(-20); // Keep last 10 exchanges
-        
-        history = systemMessage ? [systemMessage, ...recentMessages] : recentMessages;
-        console.log(`🧹 Trimmed conversation history for session ${sessionId} due to token limit`);
-    }
+    // Optimized token estimation and trimming
+    const trimmedHistory = optimizeConversationHistory(history, sessionId);
     
     // Store updated history
-    conversationHistory.set(sessionId, history);
+    conversationHistory.set(sessionId, trimmedHistory);
     
-    return history;
+    return trimmedHistory;
+}
+
+/**
+ * Optimizes conversation history by removing old messages and keeping important context
+ * @param {Array} history - Current conversation history
+ * @param {string} sessionId - Session ID for logging
+ * @returns {Array} Optimized conversation history
+ */
+function optimizeConversationHistory(history, sessionId) {
+    if (history.length <= 20) {
+        return history; // Keep recent conversations intact
+    }
+    
+    // Estimate tokens more accurately
+    const estimatedTokens = history.reduce((total, msg) => {
+        const content = msg.content || '';
+        return total + Math.ceil(content.length / 3.5); // More accurate token estimation
+    }, 0);
+    
+    const MAX_TOKENS = 30000; // Reduced for better performance
+    const MAX_MESSAGES = 30; // Maximum number of messages to keep
+    
+    if (estimatedTokens <= MAX_TOKENS && history.length <= MAX_MESSAGES) {
+        return history;
+    }
+    
+    // Keep system messages and recent messages
+    const systemMessages = history.filter(msg => msg.role === 'system');
+    const recentMessages = history.filter(msg => msg.role !== 'system').slice(-MAX_MESSAGES);
+    
+    // If we still have too many tokens, trim more aggressively
+    let finalHistory = [...systemMessages, ...recentMessages];
+    let finalTokens = finalHistory.reduce((total, msg) => total + Math.ceil((msg.content || '').length / 3.5), 0);
+    
+    if (finalTokens > MAX_TOKENS) {
+        // Keep only the most recent messages that fit within token limit
+        const messages = finalHistory.filter(msg => msg.role !== 'system');
+        finalHistory = [...systemMessages];
+        
+        for (let i = messages.length - 1; i >= 0; i--) {
+            const msg = messages[i];
+            const msgTokens = Math.ceil((msg.content || '').length / 3.5);
+            
+            if (finalTokens + msgTokens <= MAX_TOKENS) {
+                finalHistory.unshift(msg);
+                finalTokens += msgTokens;
+            } else {
+                break;
+            }
+        }
+    }
+    
+    console.log(`🧹 Optimized conversation history for session ${sessionId}: ${history.length} → ${finalHistory.length} messages`);
+    return finalHistory;
 }
 
 /**
@@ -353,9 +426,106 @@ function clearConversationHistory(sessionId) {
     console.log(`🧹 Cleared conversation history for session: ${sessionId}`);
 }
 
+/**
+ * Performance monitoring functions
+ */
+function updatePerformanceMetrics(operation, duration) {
+    performanceMetrics.totalRequests++;
+    performanceMetrics.averageResponseTime = 
+        (performanceMetrics.averageResponseTime * (performanceMetrics.totalRequests - 1) + duration) / 
+        performanceMetrics.totalRequests;
+    
+    if (operation === 'memory_search') performanceMetrics.memorySearchCount++;
+    if (operation === 'embedding_generation') performanceMetrics.embeddingGenerationCount++;
+    if (operation === 'cache_hit') performanceMetrics.cacheHits++;
+    if (operation === 'cache_miss') performanceMetrics.cacheMisses++;
+}
+
+function getPerformanceMetrics() {
+    return {
+        ...performanceMetrics,
+        cacheHitRate: performanceMetrics.cacheHits / (performanceMetrics.cacheHits + performanceMetrics.cacheMisses) || 0,
+        memoryUsage: {
+            sessions: sessionTranscripts.size,
+            conversations: conversationHistory.size,
+            memories: Array.from(memoryStorage.values()).reduce((total, memories) => total + memories.length, 0),
+            embeddings: embeddingCache.size
+        }
+    };
+}
 
 /**
- * Saves a memory to the vector store
+ * Optimized session cleanup with better memory management
+ */
+function performSessionCleanup() {
+    const now = Date.now();
+    let cleanedSessions = 0;
+    let cleanedConversations = 0;
+    
+    // Clean up old session transcripts
+    for (const [sessionId, segments] of sessionTranscripts.entries()) {
+        const hasOldSegment = segments.some(segment => {
+            const segmentTime = segment.end ? segment.end * 1000 : segment.timestamp || now;
+            return (now - segmentTime) > SESSION_CONFIG.MAX_SESSION_AGE;
+        });
+        
+        if (hasOldSegment) {
+            sessionTranscripts.delete(sessionId);
+            processedContent.delete(sessionId);
+            cleanedSessions++;
+        }
+    }
+    
+    // Clean up old conversation history
+    for (const [sessionId, history] of conversationHistory.entries()) {
+        if (history.length > 0) {
+            const lastMessage = history[history.length - 1];
+            const lastActivity = lastMessage.timestamp || 0;
+            
+            if ((now - lastActivity) > SESSION_CONFIG.MAX_CONVERSATION_AGE || history.length > 50) {
+                clearConversationHistory(sessionId);
+                cleanedConversations++;
+            }
+        }
+    }
+    
+    // Clean up rate limit history
+    for (const [userId, timestamps] of notificationHistory.entries()) {
+        const recentTimestamps = timestamps.filter(timestamp => 
+            (now - timestamp) < RATE_LIMIT_WINDOW
+        );
+        
+        if (recentTimestamps.length === 0) {
+            notificationHistory.delete(userId);
+        } else {
+            notificationHistory.set(userId, recentTimestamps);
+        }
+    }
+    
+    // Clean up embedding cache if it's too large
+    if (embeddingCache.size > MEMORY_CONFIG.MAX_EMBEDDING_CACHE_SIZE) {
+        const entries = Array.from(embeddingCache.entries());
+        const toDelete = entries.slice(0, Math.floor(entries.length / 2));
+        toDelete.forEach(([key]) => embeddingCache.delete(key));
+    }
+    
+    // Clean up memory storage if it's too large
+    for (const [userId, memories] of memoryStorage.entries()) {
+        if (memories.length > MEMORY_CONFIG.MAX_MEMORIES_PER_USER) {
+            memories.splice(0, memories.length - MEMORY_CONFIG.MAX_MEMORIES_PER_USER);
+        }
+    }
+    
+    if (cleanedSessions > 0 || cleanedConversations > 0) {
+        console.log(`🧹 Cleanup completed: ${cleanedSessions} sessions, ${cleanedConversations} conversations`);
+    }
+    
+    performanceMetrics.lastCleanup = now;
+}
+
+
+/**
+ * Saves a memory with optimized storage and caching
  * @param {string} userId - The user ID
  * @param {string} content - The memory content
  * @param {string} category - The memory category
@@ -363,47 +533,117 @@ function clearConversationHistory(sessionId) {
  * @returns {Promise<string>} The memory ID
  */
 async function saveMemory(userId, content, category = 'general', metadata = {}) {
-    if (!chromaClient || !memoriesCollection) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
-    }
-
     try {
         const memoryId = uuidv4();
+        const timestamp = new Date().toISOString();
         
         const memoryData = {
             id: memoryId,
             userId: userId,
             content: content,
             category: category,
-            timestamp: new Date().toISOString(),
+            timestamp: timestamp,
             metadata: {
                 ...metadata,
                 source: 'conversation'
             }
         };
 
-        // Generate embedding manually
-        const embedding = await generateEmbedding(content);
-        
-        // Store in ChromaDB with manual embedding
-        await memoriesCollection.add({
-            ids: [memoryId],
-            documents: [content],
-            embeddings: [embedding],
-            metadatas: [memoryData]
-        });
-
-        // Cache in memory for quick access
+        // Store in local memory first (fast)
         if (!memoryStorage.has(userId)) {
             memoryStorage.set(userId, []);
         }
-        memoryStorage.get(userId).push(memoryData);
+        
+        const userMemories = memoryStorage.get(userId);
+        
+        // Enforce memory limit per user
+        if (userMemories.length >= MEMORY_CONFIG.MAX_MEMORIES_PER_USER) {
+            // Remove oldest memory
+            userMemories.shift();
+        }
+        
+        userMemories.push(memoryData);
+        
+        // Update memory index for fast category lookup
+        if (!memoryIndex.has(userId)) {
+            memoryIndex.set(userId, new Map());
+        }
+        const userIndex = memoryIndex.get(userId);
+        if (!userIndex.has(category)) {
+            userIndex.set(category, []);
+        }
+        userIndex.get(category).push(memoryId);
+
+        // Generate and cache embedding asynchronously (non-blocking)
+        generateEmbeddingAsync(content, memoryId);
+
+        // Store in ChromaDB asynchronously (non-blocking backup)
+        if (chromaClient && memoriesCollection) {
+            storeInChromaDBAsync(memoryData, content);
+        }
 
         console.log(`💾 Saved memory for user ${userId}: ${content.substring(0, 50)}...`);
         return memoryId;
     } catch (error) {
         console.error('❌ Error saving memory:', error);
         throw error;
+    }
+}
+
+/**
+ * Generate embedding asynchronously and cache it
+ * @param {string} content - Content to embed
+ * @param {string} memoryId - Memory ID for caching
+ */
+async function generateEmbeddingAsync(content, memoryId) {
+    try {
+        // Check cache first
+        const contentHash = Buffer.from(content).toString('base64');
+        if (embeddingCache.has(contentHash)) {
+            updatePerformanceMetrics('cache_hit', 0);
+            return embeddingCache.get(contentHash);
+        }
+
+        updatePerformanceMetrics('cache_miss', 0);
+        const embeddingStart = Date.now();
+        const embedding = await generateEmbedding(content);
+        const embeddingDuration = Date.now() - embeddingStart;
+        updatePerformanceMetrics('embedding_generation', embeddingDuration);
+        
+        // Cache the embedding
+        embeddingCache.set(contentHash, embedding);
+        
+        // Cleanup cache if it gets too large
+        if (embeddingCache.size > MEMORY_CONFIG.MAX_EMBEDDING_CACHE_SIZE) {
+            const entries = Array.from(embeddingCache.entries());
+            const toDelete = entries.slice(0, Math.floor(entries.length / 2));
+            toDelete.forEach(([key]) => embeddingCache.delete(key));
+        }
+        
+        return embedding;
+    } catch (error) {
+        console.warn('⚠️ Failed to generate embedding:', error.message);
+    }
+}
+
+/**
+ * Store memory in ChromaDB asynchronously (backup)
+ * @param {object} memoryData - Memory data
+ * @param {string} content - Memory content
+ */
+async function storeInChromaDBAsync(memoryData, content) {
+    try {
+        const embedding = await generateEmbeddingAsync(content, memoryData.id);
+        if (embedding) {
+            await memoriesCollection.add({
+                ids: [memoryData.id],
+                documents: [content],
+                embeddings: [embedding],
+                metadatas: [memoryData]
+            });
+        }
+    } catch (error) {
+        console.warn('⚠️ Failed to store in ChromaDB:', error.message);
     }
 }
 
@@ -427,17 +667,120 @@ async function generateEmbedding(text) {
 }
 
 /**
- * Searches for relevant memories using semantic similarity
+ * Batch process multiple embeddings for efficiency
+ * @param {Array<string>} texts - Array of texts to embed
+ * @returns {Promise<Array>} Array of embedding vectors
+ */
+async function generateBatchEmbeddings(texts) {
+    if (!process.env.OPENAI_KEY) {
+        throw new Error('OPENAI_KEY is required for embedding generation');
+    }
+    
+    if (texts.length === 0) return [];
+    if (texts.length === 1) return [await generateEmbedding(texts[0])];
+    
+    const openai = getOpenAIClient();
+    const response = await openai.embeddings.create({
+        model: "text-embedding-3-small",
+        input: texts
+    });
+    
+    return response.data.map(item => item.embedding);
+}
+
+/**
+ * Searches for relevant memories using optimized local search with ChromaDB fallback
  * @param {string} userId - The user ID
  * @param {string} query - The search query
  * @param {number} limit - Maximum number of results
  * @returns {Promise<Array>} Array of relevant memories
  */
 async function searchMemories(userId, query, limit = 5) {
-    if (!chromaClient || !memoriesCollection) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
+    try {
+        // First try local search for fast results
+        const localResults = searchMemoriesLocally(userId, query, limit);
+        if (localResults.length > 0) {
+            console.log(`⚡ Local memory search found ${localResults.length} results`);
+            return localResults;
+        }
+
+        // Fallback to ChromaDB for semantic search if local search is insufficient
+        if (chromaClient && memoriesCollection) {
+            console.log('🔍 Falling back to ChromaDB for semantic search');
+            return await searchMemoriesChromaDB(userId, query, limit);
+        }
+
+        return [];
+    } catch (error) {
+        console.error('❌ Error searching memories:', error);
+        // Return empty array instead of throwing to prevent blocking
+        return [];
+    }
+}
+
+/**
+ * Fast local memory search using keyword matching and simple scoring
+ * @param {string} userId - The user ID
+ * @param {string} query - The search query
+ * @param {number} limit - Maximum number of results
+ * @returns {Array} Array of relevant memories
+ */
+function searchMemoriesLocally(userId, query, limit = 5) {
+    const userMemories = memoryStorage.get(userId) || [];
+    if (userMemories.length === 0) {
+        return [];
     }
 
+    const queryLower = query.toLowerCase();
+    const queryWords = queryLower.split(/\s+/).filter(word => word.length > 2);
+    
+    // Score memories based on keyword matches
+    const scoredMemories = userMemories.map(memory => {
+        const contentLower = memory.content.toLowerCase();
+        let score = 0;
+        
+        // Exact phrase match (highest score)
+        if (contentLower.includes(queryLower)) {
+            score += 10;
+        }
+        
+        // Individual word matches
+        queryWords.forEach(word => {
+            if (contentLower.includes(word)) {
+                score += 1;
+            }
+        });
+        
+        // Category match bonus
+        if (memory.category && queryLower.includes(memory.category.toLowerCase())) {
+            score += 2;
+        }
+        
+        // Recency bonus (newer memories get slight boost)
+        const age = Date.now() - new Date(memory.timestamp).getTime();
+        const daysOld = age / (1000 * 60 * 60 * 24);
+        if (daysOld < 7) score += 0.5;
+        else if (daysOld < 30) score += 0.2;
+        
+        return { ...memory, score };
+    });
+    
+    // Sort by score and return top results
+    return scoredMemories
+        .filter(memory => memory.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit)
+        .map(({ score, ...memory }) => memory); // Remove score from final result
+}
+
+/**
+ * ChromaDB semantic search fallback
+ * @param {string} userId - The user ID
+ * @param {string} query - The search query
+ * @param {number} limit - Maximum number of results
+ * @returns {Promise<Array>} Array of relevant memories
+ */
+async function searchMemoriesChromaDB(userId, query, limit = 5) {
     try {
         // Generate embedding for the query
         const queryEmbedding = await generateEmbedding(query);
@@ -449,11 +792,10 @@ async function searchMemories(userId, query, limit = 5) {
             where: { userId: userId }
         });
 
-        // Return the metadatas from the results
         return results.metadatas[0] || [];
     } catch (error) {
-        console.error('❌ Error searching memories:', error);
-        throw error;
+        console.warn('⚠️ ChromaDB search failed:', error.message);
+        return [];
     }
 }
 
@@ -884,6 +1226,15 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Performance metrics endpoint
+app.get('/metrics', (req, res) => {
+  res.status(200).json({
+    performance: getPerformanceMetrics(),
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
 // Help endpoint
 app.get('/help', (req, res) => {
   res.status(200).json({
@@ -1286,6 +1637,7 @@ app.get('/memories/:userId/stats', async (req, res) => {
 
 // Main Omi webhook endpoint
 app.post('/omi-webhook', async (req, res) => {
+  const requestStartTime = Date.now();
   try {
     console.log('📥 Received webhook from Omi:', JSON.stringify(req.body, null, 2));
     
@@ -1731,25 +2083,35 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
          // Get conversation history for this session
          const history = getConversationHistory(session_id);
          
-         // Search for relevant memories only for questions that might benefit from context
+         // Optimized memory search with smart context detection
          let relevantMemories = [];
-         const needsMemoryContext = question.toLowerCase().includes('remember') || 
-                                   question.toLowerCase().includes('what did') ||
-                                   question.toLowerCase().includes('tell me about') ||
-                                   question.toLowerCase().includes('do you know') ||
-                                   question.toLowerCase().includes('my') ||
-                                   question.toLowerCase().includes('i') ||
-                                   history.length > 3; // Only search if there's substantial conversation history
+         const questionLower = question.toLowerCase();
+         const isSimpleQuestion = question.length < MEMORY_CONFIG.SIMPLE_QUESTION_THRESHOLD;
+         const hasSubstantialHistory = history.length > MEMORY_CONFIG.MEMORY_SEARCH_THRESHOLD;
+         
+         // Smart context detection - only search when likely to be beneficial
+         const needsMemoryContext = !isSimpleQuestion && (
+           questionLower.includes('remember') || 
+           questionLower.includes('what did') ||
+           questionLower.includes('tell me about') ||
+           questionLower.includes('do you know') ||
+           questionLower.includes('my') ||
+           questionLower.includes('i') ||
+           hasSubstantialHistory
+         );
          
          if (needsMemoryContext) {
            try {
+             const memorySearchStart = Date.now();
              relevantMemories = await searchMemories(session_id, question, 3);
+             const memorySearchDuration = Date.now() - memorySearchStart;
+             updatePerformanceMetrics('memory_search', memorySearchDuration);
              console.log('🧠 Memory search completed, found:', relevantMemories.length, 'memories');
            } catch (memoryError) {
              console.warn('⚠️ Memory search failed, continuing without memories:', memoryError.message);
            }
          } else {
-           console.log('⚡ Skipping memory search for simple question');
+           console.log('⚡ Skipping memory search for simple question or insufficient context');
          }
          
          // Create context-aware input for the Responses API
@@ -1921,6 +2283,10 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
      sessionTranscripts.delete(session_id);
      console.log('🧹 Cleared session transcript for:', session_id);
      
+     // Update performance metrics
+     const requestDuration = Date.now() - requestStartTime;
+     updatePerformanceMetrics('request', requestDuration);
+     
      // Return success response
      res.status(200).json({
        success: true,
@@ -1929,7 +2295,11 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
        ai_response: aiResponse,
        omi_response: omiResponse,
        session_id: session_id,
-       conversation_context: 'maintained'
+       conversation_context: 'maintained',
+       performance: {
+         response_time_ms: requestDuration,
+         memory_search_performed: needsMemoryContext
+       }
      });
     
   } catch (error) {
@@ -2007,57 +2377,10 @@ app.listen(PORT, async () => {
      // OpenAI Responses API is ready to use
    console.log('✅ OpenAI Responses API ready with web search capability');
   
-     // Set up session cleanup every 5 minutes
+     // Set up optimized session cleanup
    setInterval(() => {
-     const now = Date.now();
-     const fiveMinutesAgo = now - (5 * 60 * 1000);
-     
-     for (const [sessionId, segments] of sessionTranscripts.entries()) {
-       // Check if any segment is older than 5 minutes
-       const hasOldSegment = segments.some(segment => {
-         // Use segment.end time if available, otherwise assume recent
-         return segment.end && (segment.end * 1000) < fiveMinutesAgo;
-       });
-       
-       if (hasOldSegment) {
-         sessionTranscripts.delete(sessionId);
-         processedContent.delete(sessionId); // Also clean up processed content tracking
-         console.log('🧹 Cleaned up old session:', sessionId);
-       }
-     }
-     
-     // Clean up conversation history for sessions that haven't been active for 30 minutes
-     const thirtyMinutesAgo = now - (30 * 60 * 1000);
-     for (const [sessionId, history] of conversationHistory.entries()) {
-       // If no recent activity, clean up conversation history
-       // This is a simple cleanup - in production you might want more sophisticated tracking
-       if (history.length > 0) {
-         const lastMessage = history[history.length - 1];
-         // Simple heuristic: if we have more than 50 messages, it's probably old
-         if (history.length > 50) {
-           clearConversationHistory(sessionId);
-         }
-       }
-     }
-   }, 5 * 60 * 1000); // 5 minutes
-   
-   // Set up rate limit cleanup every hour
-   setInterval(() => {
-     const now = Date.now();
-     const oneHourAgo = now - RATE_LIMIT_WINDOW;
-     
-     for (const [userId, timestamps] of notificationHistory.entries()) {
-       // Remove timestamps older than 1 hour
-       const recentTimestamps = timestamps.filter(timestamp => timestamp > oneHourAgo);
-       
-       if (recentTimestamps.length === 0) {
-         notificationHistory.delete(userId);
-         console.log('🧹 Cleaned up old rate limit history for user:', userId);
-       } else {
-         notificationHistory.set(userId, recentTimestamps);
-       }
-     }
-   }, RATE_LIMIT_WINDOW); // 1 hour
+     performSessionCleanup();
+   }, SESSION_CONFIG.CLEANUP_INTERVAL);
   
   console.log('✅ Server ready to receive Omi webhooks');
 });
