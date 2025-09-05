@@ -2115,6 +2115,7 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
      const startTime = Date.now();
      
      let aiResponse = '';
+     let needsMemoryContext = false; // Declare at function scope for performance tracking
      
      try {
          // Get conversation history for this session
@@ -2127,7 +2128,7 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
          const hasSubstantialHistory = history.length > MEMORY_CONFIG.MEMORY_SEARCH_THRESHOLD;
          
          // Smart context detection - only search when likely to be beneficial
-         const needsMemoryContext = !isSimpleQuestion && (
+         needsMemoryContext = !isSimpleQuestion && (
            questionLower.includes('remember') || 
            questionLower.includes('what did') ||
            questionLower.includes('tell me about') ||
@@ -2209,7 +2210,7 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
              
              // Search for relevant memories only if needed (same logic as main path)
              let relevantMemories = [];
-             const needsMemoryContext = question.toLowerCase().includes('remember') || 
+             needsMemoryContext = question.toLowerCase().includes('remember') || 
                                        question.toLowerCase().includes('what did') ||
                                        question.toLowerCase().includes('tell me about') ||
                                        question.toLowerCase().includes('do you know') ||
