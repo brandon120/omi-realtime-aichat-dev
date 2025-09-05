@@ -32,6 +32,9 @@ const conversationHistory = new Map();
 // Track processed content to prevent duplicate notifications
 const processedContent = new Map();
 
+// Track pending confirmations for destructive actions
+const pendingConfirmations = new Map();
+
 // Enhanced memory storage with local caching and efficient search
 const memoryStorage = new Map(); // In-memory cache for quick access
 const embeddingCache = new Map(); // Cache for embeddings to avoid regeneration
@@ -67,7 +70,8 @@ const SESSION_CONFIG = {
   MAX_SESSION_AGE: 5 * 60 * 1000, // 5 minutes
   MAX_CONVERSATION_AGE: 30 * 60 * 1000, // 30 minutes
   CLEANUP_INTERVAL: 2 * 60 * 1000, // 2 minutes
-  MAX_SESSIONS: 1000
+  MAX_SESSIONS: 1000,
+  CONFIRMATION_TIMEOUT: 5 * 60 * 1000 // 5 minutes for pending confirmations
 };
 
 /**
@@ -429,8 +433,17 @@ function performSessionCleanup() {
         }
     }
     
-    if (cleanedSessions > 0 || cleanedConversations > 0) {
-        console.log(`🧹 Cleanup completed: ${cleanedSessions} sessions, ${cleanedConversations} conversations`);
+    // Clean up expired pending confirmations
+    let cleanedConfirmations = 0;
+    for (const [sessionId, confirmation] of pendingConfirmations.entries()) {
+        if (now - confirmation.timestamp > SESSION_CONFIG.CONFIRMATION_TIMEOUT) {
+            pendingConfirmations.delete(sessionId);
+            cleanedConfirmations++;
+        }
+    }
+    
+    if (cleanedSessions > 0 || cleanedConversations > 0 || cleanedConfirmations > 0) {
+        console.log(`🧹 Cleanup completed: ${cleanedSessions} sessions, ${cleanedConversations} conversations, ${cleanedConfirmations} confirmations`);
     }
     
     performanceMetrics.lastCleanup = now;
@@ -1061,7 +1074,33 @@ app.get('/help', (req, res) => {
     features: {
       web_search: 'Built-in web search for current information',
       natural_language: 'Understands natural conversation patterns',
-      rate_limiting: 'Smart rate limiting to prevent API errors'
+      rate_limiting: 'Smart rate limiting to prevent API errors',
+      memory_management: 'Save and retrieve important information with smart categorization',
+      notes_summaries: 'Create structured conversation summaries with key topics and decisions',
+      todo_lists: 'Extract actionable tasks with priorities and due dates',
+      context_management: 'Clear conversation history with safety confirmations'
+    },
+    voice_commands: {
+      memory: [
+        'save to memory', 'remember this', 'store information', 'save information',
+        'save as memory', 'memorize this', 'keep this', 'save this'
+      ],
+      notes: [
+        'save notes', 'create summary', 'save this conversation', 'summarize',
+        'save as notes', 'make notes', 'take notes', 'conversation summary'
+      ],
+      todos: [
+        'save as todos', 'create todo list', 'extract tasks', 'make todo list',
+        'save as tasks', 'create tasks', 'todo list', 'task list'
+      ],
+      context: [
+        'clear context', 'start fresh', 'forget this conversation', 'reset',
+        'clear memory', 'new conversation', 'forget everything'
+      ],
+      help: [
+        'help', 'what can you do', 'how to use', 'instructions', 'guide',
+        'what do you do', 'how does this work', 'what are the commands'
+      ]
     }
   });
 });
@@ -1519,6 +1558,18 @@ app.post('/omi-webhook', async (req, res) => {
       'clear memory', 'new conversation', 'forget everything'
     ];
     
+    // Confirmation keywords
+    const confirmationKeywords = [
+      'yes', 'confirm', 'proceed', 'go ahead', 'do it', 'sure', 'okay', 'ok',
+      'yep', 'yeah', 'absolutely', 'definitely', 'continue'
+    ];
+    
+    // Cancellation keywords
+    const cancellationKeywords = [
+      'no', 'cancel', 'stop', 'abort', 'nevermind', 'forget it', 'don\'t',
+      'nope', 'nah', 'not now', 'wait'
+    ];
+    
     const isAskingForHelp = helpKeywords.some(keyword => 
       transcriptLower.includes(keyword)
     );
@@ -1536,6 +1587,14 @@ app.post('/omi-webhook', async (req, res) => {
     );
     
     const isContextCommand = contextKeywords.some(keyword => 
+      transcriptLower.includes(keyword)
+    );
+    
+    const isConfirmation = confirmationKeywords.some(keyword => 
+      transcriptLower.includes(keyword)
+    );
+    
+    const isCancellation = cancellationKeywords.some(keyword => 
       transcriptLower.includes(keyword)
     );
     
@@ -1576,13 +1635,31 @@ app.post('/omi-webhook', async (req, res) => {
       // User is asking for help, provide helpful response
       const helpMessage = `Hi! I'm Omi, your AI assistant. You can talk to me naturally! Try asking questions like "What's the weather like?" or "Can you search for current news?" I'll automatically detect when you need my help.
 
-**New Memory Features:**
-- "save to memory" - Store important information
-- "save notes" - Create conversation summary
-- "save as todos" - Extract actionable tasks
-- "clear context" - Start fresh conversation
+**🧠 Memory Management:**
+- "save to memory" - Store important information with smart categorization
+- "remember this" - Quick memory storage
+- "store information" - Save facts and details
 
-I can remember things for you and help organize your thoughts!`;
+**📝 Notes & Summaries:**
+- "save notes" - Create structured conversation summaries
+- "create summary" - Extract key topics and decisions
+- "summarize" - Quick conversation overview
+
+**✅ Todo Lists:**
+- "save as todos" - Extract tasks with priorities and due dates
+- "create todo list" - Generate actionable task lists
+- "extract tasks" - Find action items from conversations
+
+**🧹 Context Management:**
+- "clear context" - Reset conversation (with safety confirmation)
+- "start fresh" - Begin new conversation
+- "forget this conversation" - Clear history
+
+**❓ Help:**
+- "help" - Show this message
+- "what can you do" - Learn about features
+
+I can remember things for you, organize your thoughts, and help you stay productive!`;
       
       console.log('💡 User asked for help, providing instructions');
       
@@ -1615,24 +1692,54 @@ I can remember things for you and help organize your thoughts!`;
           });
         }
         
-        // Use AI to categorize the memory
+        // Use AI to categorize and analyze the memory
         const openaiClient = getOpenAIClient();
         const categoryResponse = await openaiClient.chat.completions.create({
           model: 'gpt-4o',
           messages: [
-            { role: 'system', content: 'Categorize the following information into one of these categories: personal, work, learning, general, facts, preferences, or other. Respond with just the category name.' },
+            { role: 'system', content: 'Analyze the following information and categorize it. Respond with a JSON object containing: {"category": "personal|work|learning|general|facts|preferences|contacts|events|ideas|other", "tags": ["tag1", "tag2"], "importance": "high|medium|low", "summary": "brief summary"}' },
             { role: 'user', content: memoryContent }
           ],
-          max_tokens: 20,
+          max_tokens: 150,
           temperature: 0.3
         });
         
-        const category = categoryResponse.choices[0].message.content.trim().toLowerCase();
+        let categoryData;
+        try {
+          categoryData = JSON.parse(categoryResponse.choices[0].message.content);
+        } catch (parseError) {
+          // Fallback to simple categorization if JSON parsing fails
+          const simpleCategoryResponse = await openaiClient.chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+              { role: 'system', content: 'Categorize the following information into one of these categories: personal, work, learning, general, facts, preferences, contacts, events, ideas, or other. Respond with just the category name.' },
+              { role: 'user', content: memoryContent }
+            ],
+            max_tokens: 20,
+            temperature: 0.3
+          });
+          categoryData = {
+            category: simpleCategoryResponse.choices[0].message.content.trim().toLowerCase(),
+            tags: [],
+            importance: 'medium',
+            summary: memoryContent.substring(0, 100) + '...'
+          };
+        }
         
-        // Save to memory
+        const category = categoryData.category || 'general';
+        const tags = categoryData.tags || [];
+        const importance = categoryData.importance || 'medium';
+        const summary = categoryData.summary || memoryContent.substring(0, 100) + '...';
+        
+        // Save to memory with enhanced metadata
         let memoryId;
         try {
-            memoryId = await saveMemory(session_id, memoryContent, category);
+            memoryId = await saveMemory(session_id, memoryContent, category, {
+              tags: tags,
+              importance: importance,
+              summary: summary,
+              timestamp: new Date().toISOString()
+            });
         } catch (memoryError) {
             console.warn('⚠️ Failed to save memory:', memoryError.message);
             return res.status(200).json({
@@ -1651,6 +1758,9 @@ I can remember things for you and help organize your thoughts!`;
           message: `✅ Saved to memory: "${memoryContent}"`,
           memory_id: memoryId,
           category: category,
+          tags: tags,
+          importance: importance,
+          summary: summary,
           action: 'memory_saved'
         });
         
@@ -1667,16 +1777,65 @@ I can remember things for you and help organize your thoughts!`;
     if (isContextCommand) {
       console.log('🧹 User wants to clear context');
       
-      // Clear conversation history
-      clearConversationHistory(session_id);
-      
-      // Clear session transcript
-      sessionTranscripts.delete(session_id);
-      
-      return res.status(200).json({
-        message: '✅ Context cleared! Starting fresh conversation.',
-        action: 'context_cleared'
-      });
+      // Check if there's a pending confirmation for this session
+      if (pendingConfirmations.has(session_id) && pendingConfirmations.get(session_id).type === 'clear_context') {
+        if (isConfirmation) {
+          // User confirmed - proceed with clearing
+          console.log('✅ User confirmed context clearing');
+          
+          // Clear conversation history
+          clearConversationHistory(session_id);
+          
+          // Clear session transcript
+          sessionTranscripts.delete(session_id);
+          
+          // Clear pending confirmation
+          pendingConfirmations.delete(session_id);
+          
+          return res.status(200).json({
+            message: '✅ Context cleared! Starting fresh conversation.',
+            action: 'context_cleared'
+          });
+        } else if (isCancellation) {
+          // User cancelled - abort clearing
+          console.log('❌ User cancelled context clearing');
+          pendingConfirmations.delete(session_id);
+          
+          return res.status(200).json({
+            message: '❌ Context clearing cancelled. Your conversation history is preserved.',
+            action: 'context_clear_cancelled'
+          });
+        } else {
+          // User didn't give clear confirmation/cancellation
+          return res.status(200).json({
+            message: 'Please confirm: Are you sure you want to clear the conversation context? This will delete all conversation history. Say "yes" to confirm or "no" to cancel.',
+            action: 'awaiting_confirmation'
+          });
+        }
+      } else {
+        // First time asking - show confirmation prompt
+        const historyLength = getConversationHistory(session_id).length;
+        
+        if (historyLength === 0) {
+          // No conversation to clear
+          return res.status(200).json({
+            message: 'There\'s no conversation context to clear. You\'re already starting fresh!',
+            action: 'no_context_to_clear'
+          });
+        }
+        
+        // Set pending confirmation
+        pendingConfirmations.set(session_id, {
+          type: 'clear_context',
+          timestamp: Date.now()
+        });
+        
+        return res.status(200).json({
+          message: `⚠️ Are you sure you want to clear the conversation context? This will delete ${historyLength} messages from our conversation history and cannot be undone. Say "yes" to confirm or "no" to cancel.`,
+          action: 'awaiting_confirmation',
+          conversation_length: historyLength
+        });
+      }
     }
     
     // Handle notes/summary commands
@@ -1694,8 +1853,25 @@ I can remember things for you and help organize your thoughts!`;
           });
         }
         
-        // Create conversation summary using AI
-        const summaryPrompt = `Create a concise summary of this conversation. Focus on key points, decisions made, and important information discussed. Keep it under 200 words.
+        // Create enhanced conversation summary using AI
+        const summaryPrompt = `Create a comprehensive summary of this conversation with the following structure:
+
+**Key Topics Discussed:**
+- List main topics covered
+
+**Important Decisions Made:**
+- Any decisions or conclusions reached
+
+**Action Items:**
+- Any tasks or follow-ups mentioned
+
+**Key Information:**
+- Important facts, data, or details shared
+
+**Next Steps:**
+- Any planned future actions or discussions
+
+Keep the summary clear, well-organized, and under 300 words. Focus on the most important and actionable content.
 
 Conversation:
 ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`).join('\n')}`;
@@ -1704,10 +1880,10 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
         const summaryResponse = await openaiClient.chat.completions.create({
           model: 'gpt-4o',
           messages: [
-            { role: 'system', content: 'You are a helpful assistant that creates clear, concise conversation summaries.' },
+            { role: 'system', content: 'You are a helpful assistant that creates structured, comprehensive conversation summaries. Always format with clear sections and bullet points.' },
             { role: 'user', content: summaryPrompt }
           ],
-          max_tokens: 300,
+          max_tokens: 500,
           temperature: 0.7
         });
         
@@ -1765,8 +1941,17 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
           });
         }
         
-        // Extract todos using AI
-        const todoPrompt = `Extract actionable tasks and todos from this conversation. Format as a numbered list. Only include specific, actionable items. If no clear tasks are mentioned, respond with "No specific tasks identified."
+        // Extract enhanced todos using AI with priorities and due dates
+        const todoPrompt = `Extract actionable tasks and todos from this conversation. For each task, include:
+1. The task description
+2. Priority level (High, Medium, Low) based on urgency and importance
+3. Due date if mentioned (or "No due date" if not specified)
+4. Any additional context or notes
+
+Format each task as:
+[Priority] Task Description | Due: [Date] | Notes: [Context]
+
+If no clear tasks are mentioned, respond with "No specific tasks identified."
 
 Conversation:
 ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`).join('\n')}`;
@@ -1775,10 +1960,10 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
         const todoResponse = await openaiClient.chat.completions.create({
           model: 'gpt-4o',
           messages: [
-            { role: 'system', content: 'You are a helpful assistant that extracts actionable tasks from conversations. Format as a clear numbered list.' },
+            { role: 'system', content: 'You are a helpful assistant that extracts actionable tasks from conversations with priority levels and due dates. Always format with clear structure and include priority and due date information.' },
             { role: 'user', content: todoPrompt }
           ],
-          max_tokens: 500,
+          max_tokens: 800,
           temperature: 0.5
         });
         
