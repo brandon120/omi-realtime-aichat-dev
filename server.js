@@ -1,8 +1,8 @@
 const express = require('express');
 const https = require('https');
 const OpenAI = require('openai');
-const { ChromaClient } = require('chromadb');
 const { v4: uuidv4 } = require('uuid');
+const PgVectorMemoryStorage = require('./pgvector-memory-storage');
 require('dotenv').config();
 
 /**
@@ -36,9 +36,10 @@ const processedContent = new Map();
 const memoryStorage = new Map(); // In-memory cache for quick access
 const embeddingCache = new Map(); // Cache for embeddings to avoid regeneration
 const memoryIndex = new Map(); // Fast lookup index by user and category
-let chromaClient = null;
-let memoriesCollection = null;
-let isChromaDBInitialized = false;
+
+// PgVector storage instance
+let pgVectorStorage = null;
+let isPgVectorInitialized = false;
 
 // Memory storage configuration
 const MEMORY_CONFIG = {
@@ -70,153 +71,44 @@ const SESSION_CONFIG = {
 };
 
 /**
- * Check if ChromaDB is properly initialized and ready
- * @returns {boolean} True if ChromaDB is ready
+ * Check if PgVector storage is properly initialized and ready
+ * @returns {boolean} True if PgVector storage is ready
  */
-function isChromaDBReady() {
-  return isChromaDBInitialized && chromaClient && memoriesCollection;
+function isPgVectorReady() {
+  return isPgVectorInitialized && pgVectorStorage && pgVectorStorage.isReady();
 }
 
-// Initialize ChromaDB for vector storage
+/**
+ * Check if vector storage is ready (PgVector or local fallback)
+ * @returns {boolean} True if vector storage is ready
+ */
+function isVectorStorageReady() {
+  return isPgVectorReady();
+}
+
+// Initialize memory storage with PgVector
 async function initializeMemoryStorage() {
   try {
-    // Check if ChromaDB URL is provided
-    const chromaUrl = process.env.CHROMA_URL || "http://localhost:8000";
-    const chromaAuthToken = process.env.CHROMA_AUTH_TOKEN;
-    
-    console.log('🔗 Connecting to ChromaDB at:', chromaUrl);
-    console.log('🔑 Authentication:', chromaAuthToken ? 'Enabled' : 'Disabled');
-    
-    // Try to connect to ChromaDB with a timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
-    
-    try {
-      const headers = {};
-      if (chromaAuthToken) {
-        headers['Authorization'] = `Bearer ${chromaAuthToken}`;
-      }
-      
-      const response = await fetch(`${chromaUrl}/api/v1/heartbeat`, {
-        signal: controller.signal,
-        headers: headers
-      });
-      clearTimeout(timeoutId);
-      
-      if (!response.ok) {
-        throw new Error(`ChromaDB server responded with status: ${response.status}`);
-      }
-      
-      console.log('✅ ChromaDB heartbeat successful');
-    } catch (fetchError) {
-      clearTimeout(timeoutId);
-      throw new Error(`ChromaDB server not available at ${chromaUrl}. Please start ChromaDB server.`);
-    }
-    
-    // Configure ChromaDB client with authentication if needed
-    const clientConfig = { path: chromaUrl };
-    if (chromaAuthToken) {
-      clientConfig.auth = {
-        provider: 'token',
-        credentials: chromaAuthToken
-      };
-    }
-    
-    chromaClient = new ChromaClient(clientConfig);
-    
-    // Create or get the memories collection - using manual embeddings for Railway compatibility
-    console.log('📝 Using manual OpenAI embeddings for Railway compatibility');
-    
-    try {
-      // Try to get existing collection first
-      memoriesCollection = await chromaClient.getCollection({
-        name: "omi_memories"
-      });
-      
-      // Test if the collection works with embedding function by trying a simple query
-      try {
-        await memoriesCollection.query({
-          queryTexts: ["test"],
-          nResults: 1
-        });
-        console.log('📚 Using existing collection with embedding function');
-      } catch (queryError) {
-        if (queryError.message.includes('Bad request') || queryError.message.includes('400') || queryError.message.includes('chromadb-default-embed')) {
-          console.log('🔄 Collection exists but needs embedding function, migrating...');
-          // Get existing data before deleting
-          let existingData = [];
-          try {
-            const existingMemories = await memoriesCollection.get();
-            existingData = existingMemories.metadatas || [];
-            console.log(`📦 Found ${existingData.length} existing memories to migrate`);
-          } catch (getError) {
-            console.log('⚠️ Could not retrieve existing data, will start fresh');
-          }
-          
-          // Delete and recreate collection without embedding function
-          await chromaClient.deleteCollection({ name: "omi_memories" });
-          memoriesCollection = await chromaClient.createCollection({
-            name: "omi_memories",
-            metadata: { description: "Omi AI Chat Plugin Memory Storage" }
-          });
-          
-          // Restore existing data if any
-          if (existingData.length > 0) {
-            console.log('🔄 Restoring existing memories...');
-            const ids = existingData.map((_, index) => `migrated-${Date.now()}-${index}`);
-            const documents = existingData.map(data => data.content || '');
-            const metadatas = existingData.map(data => ({
-              ...data,
-              migrated: true,
-              originalId: data.id
-            }));
-            
-            await memoriesCollection.add({
-              ids: ids,
-              documents: documents,
-              metadatas: metadatas
-            });
-            console.log(`✅ Restored ${existingData.length} memories`);
-          }
-          
-          console.log('📚 Collection migrated with manual embeddings');
-        } else {
-          throw queryError;
-        }
-      }
-    } catch (error) {
-      if (error.message.includes('not found')) {
-        // Collection doesn't exist, create it without embedding function
-        memoriesCollection = await chromaClient.createCollection({
-          name: "omi_memories",
-          metadata: { description: "Omi AI Chat Plugin Memory Storage" }
-        });
-        console.log('📚 Created new collection with manual embeddings');
-      } else {
-        throw error;
-      }
-    }
-    
-    console.log('✅ Memory storage initialized with ChromaDB');
-    console.log('📊 Collection name: omi_memories');
-    isChromaDBInitialized = true;
+    console.log('🔗 Initializing PgVector storage...');
+    pgVectorStorage = new PgVectorMemoryStorage();
+    await pgVectorStorage.initialize();
+    isPgVectorInitialized = true;
+    console.log('✅ Memory storage initialized with PgVector');
   } catch (error) {
-    console.error('❌ Failed to initialize ChromaDB:', error.message);
+    console.error('❌ Failed to initialize PgVector:', error.message);
     console.log('💡 Troubleshooting steps:');
-    console.log('   1. Check if ChromaDB server is running');
-    console.log('   2. Verify CHROMA_URL environment variable');
-    console.log('   3. Check CHROMA_AUTH_TOKEN if using authentication');
-    console.log('   4. Test connection manually:');
-    console.log('      curl -X GET "http://localhost:8000/api/v1/heartbeat"');
-    console.log('   5. Start ChromaDB with Docker:');
-    console.log('      docker run -p 8000:8000 chromadb/chroma:latest');
-    console.log('   6. Check server logs for detailed error information');
+    console.log('   1. Check that DATABASE_URL is set correctly');
+    console.log('   2. Verify PostgreSQL service is running in Railway');
+    console.log('   3. Ensure pgvector extension is enabled');
+    console.log('   4. Check that OPENAI_KEY is valid for embeddings');
+    console.log('   5. Review Railway logs for database connection errors');
     
     // Set initialization status to false
-    isChromaDBInitialized = false;
+    isPgVectorInitialized = false;
     
-    // Don't throw error - allow server to start without ChromaDB
-    console.warn('⚠️ Server will continue without ChromaDB features');
+    // Don't throw error - allow server to start without vector storage
+    console.warn('⚠️ Server will continue without vector storage features');
+    console.warn('💡 Memory features will use local storage fallback');
   }
 }
 
@@ -598,9 +490,9 @@ async function saveMemory(userId, content, category = 'general', metadata = {}) 
         // Generate and cache embedding asynchronously (non-blocking)
         generateEmbeddingAsync(content, memoryId);
 
-        // Store in ChromaDB asynchronously (non-blocking backup)
-        if (isChromaDBReady()) {
-            storeInChromaDBAsync(memoryData, content);
+        // Store in vector storage asynchronously (non-blocking backup)
+        if (isVectorStorageReady()) {
+            storeInVectorStorageAsync(memoryData, content);
         }
 
         console.log(`💾 Saved memory for user ${userId}: ${content.substring(0, 50)}...`);
@@ -648,23 +540,17 @@ async function generateEmbeddingAsync(content, memoryId) {
 }
 
 /**
- * Store memory in ChromaDB asynchronously (backup)
+ * Store memory in vector storage asynchronously (backup)
  * @param {object} memoryData - Memory data
  * @param {string} content - Memory content
  */
-async function storeInChromaDBAsync(memoryData, content) {
+async function storeInVectorStorageAsync(memoryData, content) {
     try {
-        const embedding = await generateEmbeddingAsync(content, memoryData.id);
-        if (embedding) {
-            await memoriesCollection.add({
-                ids: [memoryData.id],
-                documents: [content],
-                embeddings: [embedding],
-                metadatas: [memoryData]
-            });
+        if (isPgVectorReady()) {
+            await pgVectorStorage.addMemory(memoryData);
         }
     } catch (error) {
-        console.warn('⚠️ Failed to store in ChromaDB:', error.message);
+        console.warn('⚠️ Failed to store in vector storage:', error.message);
     }
 }
 
@@ -710,7 +596,7 @@ async function generateBatchEmbeddings(texts) {
 }
 
 /**
- * Searches for relevant memories using optimized local search with ChromaDB fallback
+ * Searches for relevant memories using PgVector semantic search with local fallback
  * @param {string} userId - The user ID
  * @param {string} query - The search query
  * @param {number} limit - Maximum number of results
@@ -718,20 +604,15 @@ async function generateBatchEmbeddings(texts) {
  */
 async function searchMemories(userId, query, limit = 5) {
     try {
-        // First try local search for fast results
-        const localResults = searchMemoriesLocally(userId, query, limit);
-        if (localResults.length > 0) {
-            console.log(`⚡ Local memory search found ${localResults.length} results`);
-            return localResults;
+        // Try PgVector first for semantic search
+        if (isPgVectorReady()) {
+            console.log('🔍 Using PgVector for semantic search');
+            return await pgVectorStorage.searchMemories(userId, query, limit);
         }
 
-        // Fallback to ChromaDB for semantic search if local search is insufficient
-        if (isChromaDBReady()) {
-            console.log('🔍 Falling back to ChromaDB for semantic search');
-            return await searchMemoriesChromaDB(userId, query, limit);
-        }
-
-        return [];
+        // Fallback to local search if PgVector is not available
+        console.log('⚡ Using local memory search fallback');
+        return searchMemoriesLocally(userId, query, limit);
     } catch (error) {
         console.error('❌ Error searching memories:', error);
         // Return empty array instead of throwing to prevent blocking
@@ -794,31 +675,6 @@ function searchMemoriesLocally(userId, query, limit = 5) {
         .map(({ score, ...memory }) => memory); // Remove score from final result
 }
 
-/**
- * ChromaDB semantic search fallback
- * @param {string} userId - The user ID
- * @param {string} query - The search query
- * @param {number} limit - Maximum number of results
- * @returns {Promise<Array>} Array of relevant memories
- */
-async function searchMemoriesChromaDB(userId, query, limit = 5) {
-    try {
-        // Generate embedding for the query
-        const queryEmbedding = await generateEmbedding(query);
-        
-        // Use queryEmbeddings for semantic search
-        const results = await memoriesCollection.query({
-            queryEmbeddings: [queryEmbedding],
-            nResults: limit,
-            where: { userId: userId }
-        });
-
-        return results.metadatas[0] || [];
-    } catch (error) {
-        console.warn('⚠️ ChromaDB search failed:', error.message);
-        return [];
-    }
-}
 
 /**
  * Gets all memories for a user
@@ -826,20 +682,16 @@ async function searchMemoriesChromaDB(userId, query, limit = 5) {
  * @returns {Promise<Array>} Array of user's memories
  */
 async function getUserMemories(userId) {
-    if (!isChromaDBReady()) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
+    // Try PgVector first, then local fallback
+    if (isPgVectorReady()) {
+        const result = await pgVectorStorage.getAllMemories(userId, { limit: 1000 });
+        return result.memories;
     }
-
-    try {
-        const results = await memoriesCollection.get({
-            where: { userId: userId }
-        });
-
-        return results.metadatas || [];
-    } catch (error) {
-        console.error('❌ Error getting user memories:', error);
-        throw error;
-    }
+    
+    // Fallback to local storage if no vector storage is available
+    console.warn('⚠️ No vector storage available, using local memory fallback');
+    const result = await getLocalMemories(userId, { limit: 1000 });
+    return result.memories;
 }
 
 /**
@@ -848,43 +700,36 @@ async function getUserMemories(userId) {
  * @returns {Promise<boolean>} Success status
  */
 async function deleteMemory(memoryId) {
-    if (!isChromaDBReady()) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
+    // Try PgVector first
+    if (isPgVectorReady()) {
+        return await pgVectorStorage.deleteMemory(memoryId);
     }
-
-    try {
-        await memoriesCollection.delete({
-            ids: [memoryId]
-        });
-
-        // Remove from memory cache
-        for (const [userId, memories] of memoryStorage.entries()) {
-            const index = memories.findIndex(m => m.id === memoryId);
-            if (index !== -1) {
-                memories.splice(index, 1);
-                break;
-            }
+    
+    // Fallback to local storage
+    console.warn('⚠️ No vector storage available, using local memory fallback');
+    
+    // Remove from memory cache
+    let deleted = false;
+    for (const [userId, memories] of memoryStorage.entries()) {
+        const index = memories.findIndex(m => m.id === memoryId);
+        if (index !== -1) {
+            memories.splice(index, 1);
+            deleted = true;
+            break;
         }
-
-        console.log(`🗑️ Deleted memory: ${memoryId}`);
-        return true;
-    } catch (error) {
-        console.error('❌ Error deleting memory:', error);
-        throw error;
     }
+
+    console.log(`🗑️ Deleted memory: ${memoryId}`);
+    return deleted;
 }
 
 /**
- * Get all memories for a user with advanced filtering and pagination
+ * Get memories from local storage (fallback when PgVector is not available)
  * @param {string} userId - The user ID
  * @param {Object} options - Filtering and pagination options
  * @returns {Promise<Object>} Paginated memories with metadata
  */
-async function getAllMemories(userId, options = {}) {
-    if (!isChromaDBReady()) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
-    }
-    
+async function getLocalMemories(userId, options = {}) {
     const {
         limit = 50,
         offset = 0,
@@ -895,53 +740,75 @@ async function getAllMemories(userId, options = {}) {
     } = options;
     
     try {
-        // Build where clause for filtering
-        const whereClause = { userId: { "$eq": userId } };
+        // Get all memories for the user from local storage
+        let userMemories = Array.from(memoryStorage.values())
+            .filter(memory => memory.userId === userId);
         
+        // Apply filters
         if (category) {
-            whereClause.category = { "$eq": category };
+            userMemories = userMemories.filter(memory => memory.category === category);
         }
         
         if (startDate || endDate) {
-            whereClause.timestamp = {};
-            if (startDate) whereClause.timestamp["$gte"] = startDate;
-            if (endDate) whereClause.timestamp["$lte"] = endDate;
-        }
-        
-        // If search query provided, use semantic search
-        if (searchQuery) {
-            // Generate embedding for the search query
-            const queryEmbedding = await generateEmbedding(searchQuery);
-            
-            const searchResults = await memoriesCollection.query({
-                queryEmbeddings: [queryEmbedding],
-                nResults: limit,
-                where: whereClause
+            userMemories = userMemories.filter(memory => {
+                if (!memory.timestamp) return false;
+                const memoryDate = new Date(memory.timestamp);
+                if (startDate && memoryDate < new Date(startDate)) return false;
+                if (endDate && memoryDate > new Date(endDate)) return false;
+                return true;
             });
-            
-            return {
-                memories: searchResults.metadatas[0] || [],
-                total: searchResults.metadatas[0]?.length || 0,
-                hasMore: false
-            };
         }
         
-        // Otherwise, get all memories with filters
-        const results = await memoriesCollection.get({
-            where: whereClause,
-            limit: limit,
-            offset: offset
-        });
+        // Apply search query (simple text search)
+        if (searchQuery) {
+            const query = searchQuery.toLowerCase();
+            userMemories = userMemories.filter(memory => 
+                memory.content.toLowerCase().includes(query) ||
+                (memory.category && memory.category.toLowerCase().includes(query))
+            );
+        }
+        
+        // Sort by timestamp (newest first)
+        userMemories.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        
+        // Apply pagination
+        const total = userMemories.length;
+        const paginatedMemories = userMemories.slice(offset, offset + limit);
         
         return {
-            memories: results.metadatas || [],
-            total: results.metadatas?.length || 0,
-            hasMore: results.metadatas?.length === limit
+            memories: paginatedMemories,
+            total: total,
+            limit: limit,
+            offset: offset,
+            hasMore: offset + limit < total
         };
     } catch (error) {
-        console.error('❌ Error getting memories:', error);
-        throw error;
+        console.error('❌ Error getting local memories:', error);
+        return {
+            memories: [],
+            total: 0,
+            limit: limit,
+            offset: offset,
+            hasMore: false
+        };
     }
+}
+
+/**
+ * Get all memories for a user with advanced filtering and pagination
+ * @param {string} userId - The user ID
+ * @param {Object} options - Filtering and pagination options
+ * @returns {Promise<Object>} Paginated memories with metadata
+ */
+async function getAllMemories(userId, options = {}) {
+    // Try PgVector first, then local fallback
+    if (isPgVectorReady()) {
+        return await pgVectorStorage.getAllMemories(userId, options);
+    }
+    
+    // Fallback to local storage if no vector storage is available
+    console.warn('⚠️ No vector storage available, using local memory fallback');
+    return await getLocalMemories(userId, options);
 }
 
 /**
@@ -950,28 +817,23 @@ async function getAllMemories(userId, options = {}) {
  * @returns {Promise<Object|null>} Memory object or null if not found
  */
 async function getMemoryById(memoryId) {
-    if (!isChromaDBReady()) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
+    // Try PgVector first
+    if (isPgVectorReady()) {
+        return await pgVectorStorage.getMemoryById(memoryId);
     }
     
-    try {
-        const results = await memoriesCollection.get({
-            ids: [memoryId]
-        });
-        
-        if (results.metadatas && results.metadatas.length > 0) {
-            return {
-                id: memoryId,
-                content: results.documents[0],
-                metadata: results.metadatas[0]
-            };
+    // Fallback to local storage
+    console.warn('⚠️ No vector storage available, using local memory fallback');
+    
+    // Search in local memory storage
+    for (const [userId, memories] of memoryStorage.entries()) {
+        const memory = memories.find(m => m.id === memoryId);
+        if (memory) {
+            return memory;
         }
-        
-        return null;
-    } catch (error) {
-        console.error('❌ Error getting memory by ID:', error);
-        throw error;
     }
+    
+    return null;
 }
 
 /**
@@ -980,27 +842,26 @@ async function getMemoryById(memoryId) {
  * @returns {Promise<Array>} Array of unique categories
  */
 async function getMemoryCategories(userId) {
-    if (!isChromaDBReady()) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
+    // Try PgVector first
+    if (isPgVectorReady()) {
+        return await pgVectorStorage.getMemoryCategories(userId);
     }
     
-    try {
-        const results = await memoriesCollection.get({
-            where: { userId: { "$eq": userId } }
-        });
-        
-        const categories = new Set();
-        results.metadatas?.forEach(metadata => {
-            if (metadata.category) {
-                categories.add(metadata.category);
-            }
-        });
-        
-        return Array.from(categories).sort();
-    } catch (error) {
-        console.error('❌ Error getting memory categories:', error);
-        throw error;
+    // Fallback to local storage
+    console.warn('⚠️ No vector storage available, using local memory fallback');
+    
+    const categories = new Set();
+    for (const [userId, memories] of memoryStorage.entries()) {
+        if (userId === userId) {
+            memories.forEach(memory => {
+                if (memory.category) {
+                    categories.add(memory.category);
+                }
+            });
+        }
     }
+    
+    return Array.from(categories).sort();
 }
 
 /**
@@ -1011,36 +872,42 @@ async function getMemoryCategories(userId) {
  * @returns {Promise<boolean>} Success status
  */
 async function updateMemory(memoryId, newContent, newMetadata = {}) {
-    if (!isChromaDBReady()) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
+    // Try PgVector first
+    if (isPgVectorReady()) {
+        return await pgVectorStorage.updateMemory(memoryId, newContent, newMetadata);
     }
     
-    try {
-        // Get existing memory first
-        const existing = await getMemoryById(memoryId);
-        if (!existing) {
-            throw new Error('Memory not found');
-        }
-        
-        // Update with new content and merged metadata
-        const updatedMetadata = {
-            ...existing.metadata,
-            ...newMetadata,
-            updatedAt: new Date().toISOString()
-        };
-        
-        await memoriesCollection.update({
-            ids: [memoryId],
-            documents: [newContent],
-            metadatas: [updatedMetadata]
-        });
-        
-        console.log(`📝 Updated memory: ${memoryId}`);
-        return true;
-    } catch (error) {
-        console.error('❌ Error updating memory:', error);
-        throw error;
+    // Fallback to local storage
+    console.warn('⚠️ No vector storage available, using local memory fallback');
+    
+    // Get existing memory first
+    const existing = await getMemoryById(memoryId);
+    if (!existing) {
+        return false;
     }
+    
+    // Update with new content and merged metadata
+    const updatedMetadata = {
+        ...existing.metadata,
+        ...newMetadata,
+        updatedAt: new Date().toISOString()
+    };
+    
+    // Update in local storage
+    for (const [userId, memories] of memoryStorage.entries()) {
+        const memoryIndex = memories.findIndex(m => m.id === memoryId);
+        if (memoryIndex !== -1) {
+            memories[memoryIndex] = {
+                ...memories[memoryIndex],
+                content: newContent,
+                metadata: updatedMetadata
+            };
+            console.log(`📝 Updated memory: ${memoryId}`);
+            return true;
+        }
+    }
+    
+    return false;
 }
 
 /**
@@ -1051,54 +918,14 @@ async function updateMemory(memoryId, newContent, newMetadata = {}) {
  * @returns {Promise<Array>} Search results
  */
 async function advancedMemorySearch(userId, query, options = {}) {
-    if (!isChromaDBReady()) {
-        throw new Error('Memory storage not initialized. ChromaDB is required.');
+    // Try PgVector first
+    if (isPgVectorReady()) {
+        return await pgVectorStorage.searchMemories(userId, query, options.limit || 10);
     }
     
-    const {
-        limit = 10,
-        category = null,
-        startDate = null,
-        endDate = null,
-        minSimilarity = 0.0
-    } = options;
-    
-    try {
-        // Build where clause for filtering
-        const whereClause = { userId: { "$eq": userId } };
-        
-        if (category) {
-            whereClause.category = { "$eq": category };
-        }
-        
-        if (startDate || endDate) {
-            whereClause.timestamp = {};
-            if (startDate) whereClause.timestamp["$gte"] = startDate;
-            if (endDate) whereClause.timestamp["$lte"] = endDate;
-        }
-        
-        // Generate embedding for the query
-        const queryEmbedding = await generateEmbedding(query);
-        
-        const results = await memoriesCollection.query({
-            queryEmbeddings: [queryEmbedding],
-            nResults: limit,
-            where: whereClause
-        });
-        
-        // Filter by similarity if specified
-        const filteredResults = results.metadatas[0] || [];
-        if (minSimilarity > 0 && results.distances && results.distances[0]) {
-            return filteredResults.filter((_, index) => 
-                results.distances[0][index] >= minSimilarity
-            );
-        }
-        
-        return filteredResults;
-    } catch (error) {
-        console.error('❌ Error in advanced memory search:', error);
-        throw error;
-    }
+    // Fallback to local search
+    console.warn('⚠️ No vector storage available, using local memory fallback');
+    return searchMemoriesLocally(userId, query, options.limit || 10);
 }
 
 // Web search is now handled automatically by OpenAI's web_search_preview tool
@@ -1111,90 +938,20 @@ app.use(express.urlencoded({ extended: true }));
 app.get('/debug', (req, res) => {
   res.status(200).json({
     environment: {
-      chroma_url: process.env.CHROMA_URL || 'NOT_SET',
-      chroma_auth_token: process.env.CHROMA_AUTH_TOKEN ? 'SET' : 'NOT_SET',
+      database_url: process.env.DATABASE_URL ? 'SET' : 'NOT_SET',
       openai_key: process.env.OPENAI_KEY ? 'SET' : 'NOT_SET',
       omi_app_id: process.env.OMI_APP_ID ? 'SET' : 'NOT_SET',
       omi_app_secret: process.env.OMI_APP_SECRET ? 'SET' : 'NOT_SET'
     },
     memory_status: {
-      chroma_client: chromaClient ? 'initialized' : 'not_initialized',
-      memories_collection: memoriesCollection ? 'ready' : 'not_ready',
+      storage_type: isPgVectorReady() ? 'pgvector' : 'local_fallback',
+      pgvector_ready: isPgVectorReady(),
       memory_storage_size: memoryStorage.size
     },
     timestamp: new Date().toISOString()
   });
 });
 
-// Test ChromaDB connection endpoint
-app.get('/test-chromadb', async (req, res) => {
-  try {
-    const chromaUrl = process.env.CHROMA_URL || 'https://chroma-yfcv-production.up.railway.app';
-    const authToken = process.env.CHROMA_AUTH_TOKEN;
-    
-    console.log('🧪 Testing ChromaDB connection from /test-chromadb endpoint');
-    console.log('URL:', chromaUrl);
-    console.log('Auth Token:', authToken ? 'Present' : 'Missing');
-    
-    // Test heartbeat
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
-    
-    const headers = {};
-    if (authToken) {
-      headers['Authorization'] = `Bearer ${authToken}`;
-    }
-    
-    const response = await fetch(`${chromaUrl}/api/v1/heartbeat`, {
-      signal: controller.signal,
-      headers: headers
-    });
-    clearTimeout(timeoutId);
-    
-    if (!response.ok) {
-      throw new Error(`ChromaDB heartbeat failed: ${response.status} ${response.statusText}`);
-    }
-    
-    const responseText = await response.text();
-    console.log('✅ Heartbeat successful:', responseText);
-    
-    // Test client creation
-    const clientConfig = { path: chromaUrl };
-    if (authToken) {
-      clientConfig.auth = {
-        provider: 'token',
-        credentials: authToken
-      };
-    }
-    
-    const testClient = new ChromaClient(clientConfig);
-    const testCollection = await testClient.getOrCreateCollection({
-      name: "test_connection",
-      metadata: { test: true }
-    });
-    
-    console.log('✅ ChromaDB test successful');
-    
-    res.status(200).json({
-      status: 'success',
-      message: 'ChromaDB connection test passed',
-      heartbeat_response: responseText,
-      collection_name: testCollection.name,
-      timestamp: new Date().toISOString()
-    });
-    
-  } catch (error) {
-    console.error('❌ ChromaDB test failed:', error);
-    
-    res.status(500).json({
-      status: 'error',
-      message: 'ChromaDB connection test failed',
-      error: error.message,
-      error_type: error.constructor.name,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -1631,7 +1388,15 @@ app.get('/memories/:userId/export', async (req, res) => {
 app.get('/memories/:userId/stats', async (req, res) => {
   try {
     const { userId } = req.params;
-    const result = await getAllMemories(userId, { limit: 1000 });
+    
+    // Try to get memories from ChromaDB first, fallback to local storage
+    let result;
+    try {
+      result = await getAllMemories(userId, { limit: 1000 });
+    } catch (chromaError) {
+      console.warn('⚠️ ChromaDB not available, using local memory fallback:', chromaError.message);
+      result = await getLocalMemories(userId, { limit: 1000 });
+    }
     
     // Calculate statistics
     const categories = {};
@@ -1661,13 +1426,15 @@ app.get('/memories/:userId/stats', async (req, res) => {
       types: typeCounts,
       monthly_breakdown: monthlyCounts,
       most_common_category: Object.keys(categories).reduce((a, b) => categories[a] > categories[b] ? a : b, 'uncategorized'),
-      most_common_type: Object.keys(typeCounts).reduce((a, b) => typeCounts[a] > typeCounts[b] ? a : b, 'memory')
+      most_common_type: Object.keys(typeCounts).reduce((a, b) => typeCounts[a] > typeCounts[b] ? a : b, 'memory'),
+      storage_type: isPgVectorReady() ? 'pgvector' : 'local_fallback'
     });
   } catch (error) {
     console.error('❌ Error getting memory statistics:', error);
     res.status(500).json({
       error: 'Failed to get memory statistics',
-      message: error.message
+      message: error.message,
+      storage_type: isPgVectorReady() ? 'pgvector' : 'local_fallback'
     });
   }
 });

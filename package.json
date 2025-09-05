@@ -18,10 +18,10 @@
   "license": "MIT",
   "dependencies": {
     "axios": "^1.6.0",
-    "chromadb": "^1.7.3",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "openai": "^4.20.1",
+    "pg": "^8.16.3",
     "uuid": "^9.0.1"
   },
   "devDependencies": {
