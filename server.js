@@ -875,6 +875,77 @@ async function deleteMemory(memoryId) {
 }
 
 /**
+ * Get memories from local storage (fallback when ChromaDB is not available)
+ * @param {string} userId - The user ID
+ * @param {Object} options - Filtering and pagination options
+ * @returns {Promise<Object>} Paginated memories with metadata
+ */
+async function getLocalMemories(userId, options = {}) {
+    const {
+        limit = 50,
+        offset = 0,
+        category = null,
+        startDate = null,
+        endDate = null,
+        searchQuery = null
+    } = options;
+    
+    try {
+        // Get all memories for the user from local storage
+        let userMemories = Array.from(memoryStorage.values())
+            .filter(memory => memory.userId === userId);
+        
+        // Apply filters
+        if (category) {
+            userMemories = userMemories.filter(memory => memory.category === category);
+        }
+        
+        if (startDate || endDate) {
+            userMemories = userMemories.filter(memory => {
+                if (!memory.timestamp) return false;
+                const memoryDate = new Date(memory.timestamp);
+                if (startDate && memoryDate < new Date(startDate)) return false;
+                if (endDate && memoryDate > new Date(endDate)) return false;
+                return true;
+            });
+        }
+        
+        // Apply search query (simple text search)
+        if (searchQuery) {
+            const query = searchQuery.toLowerCase();
+            userMemories = userMemories.filter(memory => 
+                memory.content.toLowerCase().includes(query) ||
+                (memory.category && memory.category.toLowerCase().includes(query))
+            );
+        }
+        
+        // Sort by timestamp (newest first)
+        userMemories.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        
+        // Apply pagination
+        const total = userMemories.length;
+        const paginatedMemories = userMemories.slice(offset, offset + limit);
+        
+        return {
+            memories: paginatedMemories,
+            total: total,
+            limit: limit,
+            offset: offset,
+            hasMore: offset + limit < total
+        };
+    } catch (error) {
+        console.error('❌ Error getting local memories:', error);
+        return {
+            memories: [],
+            total: 0,
+            limit: limit,
+            offset: offset,
+            hasMore: false
+        };
+    }
+}
+
+/**
  * Get all memories for a user with advanced filtering and pagination
  * @param {string} userId - The user ID
  * @param {Object} options - Filtering and pagination options
@@ -1631,7 +1702,15 @@ app.get('/memories/:userId/export', async (req, res) => {
 app.get('/memories/:userId/stats', async (req, res) => {
   try {
     const { userId } = req.params;
-    const result = await getAllMemories(userId, { limit: 1000 });
+    
+    // Try to get memories from ChromaDB first, fallback to local storage
+    let result;
+    try {
+      result = await getAllMemories(userId, { limit: 1000 });
+    } catch (chromaError) {
+      console.warn('⚠️ ChromaDB not available, using local memory fallback:', chromaError.message);
+      result = await getLocalMemories(userId, { limit: 1000 });
+    }
     
     // Calculate statistics
     const categories = {};
@@ -1661,13 +1740,15 @@ app.get('/memories/:userId/stats', async (req, res) => {
       types: typeCounts,
       monthly_breakdown: monthlyCounts,
       most_common_category: Object.keys(categories).reduce((a, b) => categories[a] > categories[b] ? a : b, 'uncategorized'),
-      most_common_type: Object.keys(typeCounts).reduce((a, b) => typeCounts[a] > typeCounts[b] ? a : b, 'memory')
+      most_common_type: Object.keys(typeCounts).reduce((a, b) => typeCounts[a] > typeCounts[b] ? a : b, 'memory'),
+      storage_type: isChromaDBReady() ? 'chromadb' : 'local_fallback'
     });
   } catch (error) {
     console.error('❌ Error getting memory statistics:', error);
     res.status(500).json({
       error: 'Failed to get memory statistics',
-      message: error.message
+      message: error.message,
+      storage_type: isChromaDBReady() ? 'chromadb' : 'local_fallback'
     });
   }
 });
