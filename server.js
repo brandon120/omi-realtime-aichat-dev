@@ -119,7 +119,7 @@ async function initializeMemoryStorage() {
 // Rate limiting for Omi notifications (max 10 per hour)
 const notificationQueue = [];
 const notificationHistory = new Map(); // Track notifications per user
-const MAX_NOTIFICATIONS_PER_HOUR = 10;
+const MAX_NOTIFICATIONS_PER_HOUR = 1000; // Increased from 10 to effectively bypass rate limiting
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour in milliseconds
 
 // Initialize OpenAI client (lazy initialization)
