@@ -38,6 +38,7 @@ const embeddingCache = new Map(); // Cache for embeddings to avoid regeneration
 const memoryIndex = new Map(); // Fast lookup index by user and category
 let chromaClient = null;
 let memoriesCollection = null;
+let isChromaDBInitialized = false;
 
 // Memory storage configuration
 const MEMORY_CONFIG = {
@@ -67,6 +68,14 @@ const SESSION_CONFIG = {
   CLEANUP_INTERVAL: 2 * 60 * 1000, // 2 minutes
   MAX_SESSIONS: 1000
 };
+
+/**
+ * Check if ChromaDB is properly initialized and ready
+ * @returns {boolean} True if ChromaDB is ready
+ */
+function isChromaDBReady() {
+  return isChromaDBInitialized && chromaClient && memoriesCollection;
+}
 
 // Initialize ChromaDB for vector storage
 async function initializeMemoryStorage() {
@@ -190,12 +199,24 @@ async function initializeMemoryStorage() {
     
     console.log('✅ Memory storage initialized with ChromaDB');
     console.log('📊 Collection name: omi_memories');
+    isChromaDBInitialized = true;
   } catch (error) {
     console.error('❌ Failed to initialize ChromaDB:', error.message);
-    console.log('💡 To start ChromaDB server:');
-    console.log('   docker run -p 8000:8000 chromadb/chroma:latest');
-    console.log('   or set CHROMA_URL environment variable to your ChromaDB instance');
-    throw error; // Fail startup if ChromaDB is not available
+    console.log('💡 Troubleshooting steps:');
+    console.log('   1. Check if ChromaDB server is running');
+    console.log('   2. Verify CHROMA_URL environment variable');
+    console.log('   3. Check CHROMA_AUTH_TOKEN if using authentication');
+    console.log('   4. Test connection manually:');
+    console.log('      curl -X GET "http://localhost:8000/api/v1/heartbeat"');
+    console.log('   5. Start ChromaDB with Docker:');
+    console.log('      docker run -p 8000:8000 chromadb/chroma:latest');
+    console.log('   6. Check server logs for detailed error information');
+    
+    // Set initialization status to false
+    isChromaDBInitialized = false;
+    
+    // Don't throw error - allow server to start without ChromaDB
+    console.warn('⚠️ Server will continue without ChromaDB features');
   }
 }
 
@@ -578,7 +599,7 @@ async function saveMemory(userId, content, category = 'general', metadata = {}) 
         generateEmbeddingAsync(content, memoryId);
 
         // Store in ChromaDB asynchronously (non-blocking backup)
-        if (chromaClient && memoriesCollection) {
+        if (isChromaDBReady()) {
             storeInChromaDBAsync(memoryData, content);
         }
 
@@ -705,7 +726,7 @@ async function searchMemories(userId, query, limit = 5) {
         }
 
         // Fallback to ChromaDB for semantic search if local search is insufficient
-        if (chromaClient && memoriesCollection) {
+        if (isChromaDBReady()) {
             console.log('🔍 Falling back to ChromaDB for semantic search');
             return await searchMemoriesChromaDB(userId, query, limit);
         }
@@ -805,7 +826,7 @@ async function searchMemoriesChromaDB(userId, query, limit = 5) {
  * @returns {Promise<Array>} Array of user's memories
  */
 async function getUserMemories(userId) {
-    if (!chromaClient || !memoriesCollection) {
+    if (!isChromaDBReady()) {
         throw new Error('Memory storage not initialized. ChromaDB is required.');
     }
 
@@ -827,7 +848,7 @@ async function getUserMemories(userId) {
  * @returns {Promise<boolean>} Success status
  */
 async function deleteMemory(memoryId) {
-    if (!chromaClient || !memoriesCollection) {
+    if (!isChromaDBReady()) {
         throw new Error('Memory storage not initialized. ChromaDB is required.');
     }
 
@@ -860,7 +881,7 @@ async function deleteMemory(memoryId) {
  * @returns {Promise<Object>} Paginated memories with metadata
  */
 async function getAllMemories(userId, options = {}) {
-    if (!chromaClient || !memoriesCollection) {
+    if (!isChromaDBReady()) {
         throw new Error('Memory storage not initialized. ChromaDB is required.');
     }
     
@@ -929,7 +950,7 @@ async function getAllMemories(userId, options = {}) {
  * @returns {Promise<Object|null>} Memory object or null if not found
  */
 async function getMemoryById(memoryId) {
-    if (!chromaClient || !memoriesCollection) {
+    if (!isChromaDBReady()) {
         throw new Error('Memory storage not initialized. ChromaDB is required.');
     }
     
@@ -959,7 +980,7 @@ async function getMemoryById(memoryId) {
  * @returns {Promise<Array>} Array of unique categories
  */
 async function getMemoryCategories(userId) {
-    if (!chromaClient || !memoriesCollection) {
+    if (!isChromaDBReady()) {
         throw new Error('Memory storage not initialized. ChromaDB is required.');
     }
     
@@ -990,7 +1011,7 @@ async function getMemoryCategories(userId) {
  * @returns {Promise<boolean>} Success status
  */
 async function updateMemory(memoryId, newContent, newMetadata = {}) {
-    if (!chromaClient || !memoriesCollection) {
+    if (!isChromaDBReady()) {
         throw new Error('Memory storage not initialized. ChromaDB is required.');
     }
     
@@ -1030,7 +1051,7 @@ async function updateMemory(memoryId, newContent, newMetadata = {}) {
  * @returns {Promise<Array>} Search results
  */
 async function advancedMemorySearch(userId, query, options = {}) {
-    if (!chromaClient || !memoriesCollection) {
+    if (!isChromaDBReady()) {
         throw new Error('Memory storage not initialized. ChromaDB is required.');
     }
     
@@ -1213,7 +1234,7 @@ app.get('/health', (req, res) => {
       token_limit_handling: 'automatic'
     },
     memory_system: {
-      vector_store: chromaClient ? 'ChromaDB' : 'disabled',
+      vector_store: isChromaDBReady() ? 'ChromaDB' : 'disabled',
       memory_features: [
         'save to memory',
         'save notes',
@@ -1221,9 +1242,25 @@ app.get('/health', (req, res) => {
         'clear context'
       ],
       total_memories: memoryStorage.size,
-      status: chromaClient ? 'active' : 'disabled'
+      status: isChromaDBReady() ? 'active' : 'disabled',
+      initialization_status: isChromaDBInitialized ? 'completed' : 'pending'
     }
   });
+});
+
+// ChromaDB status endpoint
+app.get('/chromadb-status', (req, res) => {
+  const status = {
+    initialized: isChromaDBInitialized,
+    ready: isChromaDBReady(),
+    client_available: !!chromaClient,
+    collection_available: !!memoriesCollection,
+    url: process.env.CHROMA_URL || 'http://localhost:8000',
+    auth_enabled: !!process.env.CHROMA_AUTH_TOKEN,
+    timestamp: new Date().toISOString()
+  };
+  
+  res.status(200).json(status);
 });
 
 // Performance metrics endpoint
@@ -2348,39 +2385,39 @@ app.use('*', (req, res) => {
 });
 
 // Start server
-app.listen(PORT, async () => {
-  console.log('🚀 Omi AI Chat Plugin server started');
-  console.log(`📍 Server running on port ${PORT}`);
-  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-  console.log(`📖 Help & instructions: http://localhost:${PORT}/help`);
-  console.log(`📡 Webhook endpoint: http://localhost:${PORT}/omi-webhook`);
-  
-  // Initialize memory storage
+async function startServer() {
+  // Initialize memory storage first
   try {
     await initializeMemoryStorage();
+    console.log('✅ Memory storage initialized successfully');
   } catch (error) {
     console.error('❌ Failed to initialize memory storage:', error.message);
     console.warn('⚠️ Server will continue without memory features');
   }
   
-  // Check environment variables (Updated)
-  if (!process.env.OPENAI_KEY) {
-    console.warn('⚠️  OPENAI_KEY environment variable is not set');
-  }
-  if (!process.env.OMI_APP_ID) {
-    console.warn('⚠️  OMI_APP_ID environment variable is not set');
-  }
-  if (!process.env.OMI_APP_SECRET) {
-    console.warn('⚠️  OMI_APP_SECRET environment variable is not set');
-  }
-  
-     // OpenAI Responses API is ready to use
-   console.log('✅ OpenAI Responses API ready with web search capability');
-  
-     // Set up optimized session cleanup
-   setInterval(() => {
-     performSessionCleanup();
-   }, SESSION_CONFIG.CLEANUP_INTERVAL);
-  
-  console.log('✅ Server ready to receive Omi webhooks');
+  // Start the server after initialization
+  app.listen(PORT, () => {
+    console.log('🚀 Omi AI Chat Plugin server started');
+    console.log(`📍 Server running on port ${PORT}`);
+    console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+    console.log(`📖 Help & instructions: http://localhost:${PORT}/help`);
+    console.log(`📡 Webhook endpoint: http://localhost:${PORT}/omi-webhook`);
+  });
+}
+
+// Check environment variables
+if (!process.env.OPENAI_KEY) {
+  console.warn('⚠️  OPENAI_KEY environment variable is not set');
+}
+if (!process.env.OMI_APP_ID) {
+  console.warn('⚠️  OMI_APP_ID environment variable is not set');
+}
+if (!process.env.OMI_APP_SECRET) {
+  console.warn('⚠️  OMI_APP_SECRET environment variable is not set');
+}
+
+// Start the server
+startServer().catch(error => {
+  console.error('❌ Failed to start server:', error.message);
+  process.exit(1);
 });
