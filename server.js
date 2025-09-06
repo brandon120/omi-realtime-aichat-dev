@@ -50,8 +50,8 @@ const MEMORY_CONFIG = {
   MAX_EMBEDDING_CACHE_SIZE: 10000,
   BATCH_EMBEDDING_SIZE: 10,
   MEMORY_CLEANUP_INTERVAL: 30 * 60 * 1000, // 30 minutes
-  SIMPLE_QUESTION_THRESHOLD: 50, // characters
-  MEMORY_SEARCH_THRESHOLD: 3 // minimum conversation length to search memories
+  SIMPLE_QUESTION_THRESHOLD: 20, // characters - reduced from 50 to be more inclusive
+  MEMORY_SEARCH_THRESHOLD: 1 // minimum conversation length to search memories - reduced from 3
 };
 
 // Performance monitoring
@@ -2205,15 +2205,23 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
          const isSimpleQuestion = question.length < MEMORY_CONFIG.SIMPLE_QUESTION_THRESHOLD;
          const hasSubstantialHistory = history.length > MEMORY_CONFIG.MEMORY_SEARCH_THRESHOLD;
          
-         // Smart context detection - only search when likely to be beneficial
-         needsMemoryContext = !isSimpleQuestion && (
+         // Smart context detection - search when likely to be beneficial
+         // More inclusive conditions for better memory search triggering
+         needsMemoryContext = (
+           // Always search if question contains memory-related keywords (regardless of length)
            questionLower.includes('remember') || 
            questionLower.includes('what did') ||
            questionLower.includes('tell me about') ||
            questionLower.includes('do you know') ||
            questionLower.includes('my') ||
            questionLower.includes('i') ||
-           hasSubstantialHistory
+           questionLower.includes('you know') ||
+           questionLower.includes('recall') ||
+           questionLower.includes('remind') ||
+           // Or if it's not a simple question and has some history
+           (!isSimpleQuestion && hasSubstantialHistory) ||
+           // Or if it's a personal question (contains personal pronouns)
+           (!isSimpleQuestion && (questionLower.includes('my ') || questionLower.includes('i ')))
          );
          
          if (needsMemoryContext) {
@@ -2288,13 +2296,26 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
              
              // Search for relevant memories only if needed (same logic as main path)
              let relevantMemories = [];
-             needsMemoryContext = question.toLowerCase().includes('remember') || 
-                                       question.toLowerCase().includes('what did') ||
-                                       question.toLowerCase().includes('tell me about') ||
-                                       question.toLowerCase().includes('do you know') ||
-                                       question.toLowerCase().includes('my') ||
-                                       question.toLowerCase().includes('i') ||
-                                       history.length > 3;
+             const questionLower = question.toLowerCase();
+             const isSimpleQuestion = question.length < MEMORY_CONFIG.SIMPLE_QUESTION_THRESHOLD;
+             const hasSubstantialHistory = history.length > MEMORY_CONFIG.MEMORY_SEARCH_THRESHOLD;
+             
+             needsMemoryContext = (
+               // Always search if question contains memory-related keywords (regardless of length)
+               questionLower.includes('remember') || 
+               questionLower.includes('what did') ||
+               questionLower.includes('tell me about') ||
+               questionLower.includes('do you know') ||
+               questionLower.includes('my') ||
+               questionLower.includes('i') ||
+               questionLower.includes('you know') ||
+               questionLower.includes('recall') ||
+               questionLower.includes('remind') ||
+               // Or if it's not a simple question and has some history
+               (!isSimpleQuestion && hasSubstantialHistory) ||
+               // Or if it's a personal question (contains personal pronouns)
+               (!isSimpleQuestion && (questionLower.includes('my ') || questionLower.includes('i ')))
+             );
              
              if (needsMemoryContext) {
                try {
