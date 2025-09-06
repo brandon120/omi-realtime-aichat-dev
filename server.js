@@ -2148,11 +2148,13 @@ ${history.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.conte
          // Extract the question from the accumulated transcript
      let question = '';
      
+     // Define heyOmiPatterns in broader scope
+     const heyOmiPatterns = ['hey, omi', 'hey omi,', 'hey, omi,', 'hey omi', 'Hey, Omi', 'Hey Omi.', 'Hey Omi,'];
+     
      if (hasHeyOmi) {
        // If "Hey Omi" was used, extract everything after it
        for (const segment of sessionSegments) {
          const segmentText = segment.text.toLowerCase();
-         const heyOmiPatterns = ['hey, omi', 'hey omi,', 'hey, omi,', 'hey omi', 'Hey, Omi', 'Hey Omi.', 'Hey Omi,'];
          
          for (const pattern of heyOmiPatterns) {
            if (segmentText.includes(pattern)) {
