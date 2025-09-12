@@ -11,6 +11,19 @@ require('dotenv').config();
  * - "Hey, Omi" (with comma)
  * - "Hey Omi," (with trailing comma)
  * - "Hey, Omi," (with both commas)
+ * - "Hey Jarvis" (Iron Man style)
+ * - "Hey, Jarvis" (with comma)
+ * - "Hey Jarvis," (with trailing comma)
+ * - "Hey, Jarvis," (with both commas)
+ * - "Hey Echo" (Amazon Alexa style)
+ * - "Hey, Echo" (with comma)
+ * - "Hey Echo," (with trailing comma)
+ * - "Hey, Echo," (with both commas)
+ * - "Hey Assistant" (Google Assistant style)
+ * - "Hey, Assistant" (with comma)
+ * - "Hey Assistant," (with trailing comma)
+ * - "Hey, Assistant," (with both commas)
+ * - "hey" (simple trigger)
  * 
  * HELP KEYWORDS: Users can ask for help using these words:
  * - "help", "what can you do", "how to use", "instructions", "guide"
@@ -155,10 +168,11 @@ app.get('/health', (req, res) => {
     status: 'OK', 
     message: 'Omi AI Chat Plugin is running',
     trigger_phrases: [
-      'Hey Omi',
-      'Hey, Omi', 
-      'Hey omi,',
-      'Hey, omi,'
+      'Hey Omi', 'Hey, Omi', 'Hey Omi,', 'Hey, Omi,',
+      'Hey Jarvis', 'Hey, Jarvis', 'Hey Jarvis,', 'Hey, Jarvis,',
+      'Hey Echo', 'Hey, Echo', 'Hey Echo,', 'Hey, Echo,',
+      'Hey Assistant', 'Hey, Assistant', 'Hey Assistant,', 'Hey, Assistant,',
+      'hey'
     ],
     help_keywords: [
       'help', 'what can you do', 'how to use', 'instructions', 'guide',
@@ -187,17 +201,19 @@ app.get('/help', (req, res) => {
     trigger_phrases: {
       description: 'Start your message with one of these phrases to activate the AI:',
       phrases: [
-        'Hey Omi',
-        'Hey, Omi', 
-        'Hey Omi,',
-        'Hey, Omi,'
+        'Hey Omi', 'Hey, Omi', 'Hey Omi,', 'Hey, Omi,',
+        'Hey Jarvis', 'Hey, Jarvis', 'Hey Jarvis,', 'Hey, Jarvis,',
+        'Hey Echo', 'Hey, Echo', 'Hey Echo,', 'Hey, Echo,',
+        'Hey Assistant', 'Hey, Assistant', 'Hey Assistant,', 'Hey, Assistant,',
+        'hey'
       ]
     },
     examples: [
       'Hey Omi, what is the weather like in Sydney, Australia?',
-      'Hey, Omi, can you help me solve a math problem?',
-      'Hey Omi, what are the latest news headlines?',
-      'Hey, Omi, how do I make a chocolate cake?'
+      'Hey Jarvis, can you help me solve a math problem?',
+      'Hey Echo, what are the latest news headlines?',
+      'Hey Assistant, how do I make a chocolate cake?',
+      'hey what time is it?'
     ],
     help_keywords: {
       description: 'You can also ask for help using these words:',
@@ -266,11 +282,23 @@ app.post('/omi-webhook', async (req, res) => {
         // Smart AI interaction detection
     const transcriptLower = fullTranscript.toLowerCase();
     
-    // Primary trigger: "Hey Omi" variations
-    const hasHeyOmi = transcriptLower.includes('hey omi') || 
-                      transcriptLower.includes('hey, omi') ||
-                      transcriptLower.includes('hey omi,') ||
-                      transcriptLower.includes('hey, omi,');
+    // Primary trigger: Multiple AI assistant variations
+    const triggerPhrases = [
+      // Omi variations
+      'hey omi', 'hey, omi', 'hey omi,', 'hey, omi,',
+      // Jarvis variations (Iron Man style)
+      'hey jarvis', 'hey, jarvis', 'hey jarvis,', 'hey, jarvis,',
+      // Echo variations (Amazon Alexa style)
+      'hey echo', 'hey, echo', 'hey echo,', 'hey, echo,',
+      // Assistant variations (Google Assistant style)
+      'hey assistant', 'hey, assistant', 'hey assistant,', 'hey, assistant,',
+      // Simple trigger
+      'hey'
+    ];
+    
+    const hasTriggerPhrase = triggerPhrases.some(phrase => 
+      transcriptLower.includes(phrase)
+    );
     
     // Secondary triggers: Natural language patterns
     const isQuestion = /\b(who|what|where|when|why|how|can you|could you|would you|tell me|show me|find|search|look up)\b/i.test(fullTranscript);
@@ -289,7 +317,7 @@ app.post('/omi-webhook', async (req, res) => {
     );
     
     // Determine if user wants AI interaction
-    const wantsAIInteraction = hasHeyOmi || (isQuestion && isCommand) || (isConversational && isCommand);
+    const wantsAIInteraction = hasTriggerPhrase || (isQuestion && isCommand) || (isConversational && isCommand);
     
     if (!wantsAIInteraction) {
       if (isAskingForHelp) {
@@ -303,7 +331,7 @@ app.post('/omi-webhook', async (req, res) => {
         return res.status(200).json({ 
           message: 'You can talk to me naturally! Try asking questions or giving commands.',
           help_response: helpMessage,
-          instructions: 'Ask questions naturally or use "Hey Omi" to be explicit.'
+          instructions: 'Ask questions naturally or use trigger phrases like "Hey Omi", "Hey Jarvis", "Hey Echo", "Hey Assistant", or just "hey" to be explicit.'
         });
       } else {
         // User didn't trigger AI interaction - silently ignore
@@ -315,29 +343,30 @@ app.post('/omi-webhook', async (req, res) => {
          // Extract the question from the accumulated transcript
      let question = '';
      
-     if (hasHeyOmi) {
-       // If "Hey Omi" was used, extract everything after it
+     if (hasTriggerPhrase) {
+       // If any trigger phrase was used, extract everything after it
        for (const segment of sessionSegments) {
          const segmentText = segment.text.toLowerCase();
-         const heyOmiPatterns = ['hey, omi', 'hey omi,', 'hey, omi,', 'hey omi', 'Hey, Omi', 'Hey Omi.', 'Hey Omi,'];
          
-         for (const pattern of heyOmiPatterns) {
-           if (segmentText.includes(pattern)) {
-             const patternIndex = segmentText.indexOf(pattern);
-             question = segment.text.substring(patternIndex + pattern.length).trim();
-             break;
-           }
+         // Find which trigger phrase was used
+         const usedTrigger = triggerPhrases.find(phrase => 
+           segmentText.includes(phrase)
+         );
+         
+         if (usedTrigger) {
+           const patternIndex = segmentText.indexOf(usedTrigger);
+           question = segment.text.substring(patternIndex + usedTrigger.length).trim();
+           break;
          }
-         if (question) break;
        }
        
-       // If no question found after "Hey Omi", use remaining segments
+       // If no question found after trigger phrase, use remaining segments
        if (!question) {
-         const heyOmiIndex = sessionSegments.findIndex(segment => 
-           heyOmiPatterns.some(pattern => segment.text.toLowerCase().includes(pattern))
+         const triggerIndex = sessionSegments.findIndex(segment => 
+           triggerPhrases.some(phrase => segment.text.toLowerCase().includes(phrase))
          );
-         if (heyOmiIndex !== -1) {
-           const remainingSegments = sessionSegments.slice(heyOmiIndex + 1);
+         if (triggerIndex !== -1) {
+           const remainingSegments = sessionSegments.slice(triggerIndex + 1);
            question = remainingSegments.map(s => s.text).join(' ').trim();
          }
        }
@@ -347,7 +376,7 @@ app.post('/omi-webhook', async (req, res) => {
      }
     
     if (!question) {
-      console.log('⏭️ Skipping transcript - no question after "hey omi"');
+      console.log('⏭️ Skipping transcript - no question after trigger phrase');
       return res.status(200).json({ 
         message: 'Transcript ignored - no question provided' 
       });
@@ -416,7 +445,7 @@ app.post('/omi-webhook', async (req, res) => {
          // Still return the AI response, but note the rate limit
          res.status(200).json({
            success: true,
-           //message: aiResponse,
+           message: "rate limit", //todo
            question: question,
            ai_response: aiResponse,
            omi_response: null,
@@ -445,7 +474,7 @@ app.post('/omi-webhook', async (req, res) => {
      // Return success response
      res.status(200).json({
        success: true,
-       message: aiResponse,
+       message: "success", //todo
        question: question,
        ai_response: aiResponse,
        omi_response: omiResponse,
@@ -461,14 +490,16 @@ app.post('/omi-webhook', async (req, res) => {
       console.error('Omi API Error:', error.message);
       res.status(500).json({
         error: 'Omi API Error',
-        message: error.message
+        message: 'Omi error message', //todo
+        //message: error.message
       });
     } else if (error.message && (error.message.includes('OMI_APP_ID not set') || error.message.includes('OMI_APP_SECRET not set'))) {
       // Configuration error
       console.error('Configuration Error:', error.message);
       res.status(500).json({
         error: 'Configuration Error',
-        message: error.message
+        message: 'Omi config error', //todo
+       // message: error.message
       });
     } else {
       // Other errors
@@ -533,7 +564,7 @@ app.listen(PORT, async () => {
        
        if (hasOldSegment) {
          sessionTranscripts.delete(sessionId);
-         console.log('🧹 Cleaned up old session:', sessionId);
+         console.log('�� Cleaned up old session:', sessionId);
        }
      }
    }, 5 * 60 * 1000); // 5 minutes
