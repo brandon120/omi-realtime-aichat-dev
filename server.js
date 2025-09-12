@@ -416,7 +416,7 @@ app.post('/omi-webhook', async (req, res) => {
          // Still return the AI response, but note the rate limit
          res.status(200).json({
            success: true,
-           message: aiResponse,
+           //message: aiResponse,
            question: question,
            ai_response: aiResponse,
            omi_response: null,
@@ -445,7 +445,7 @@ app.post('/omi-webhook', async (req, res) => {
      // Return success response
      res.status(200).json({
        success: true,
-       //message: aiResponse,
+       message: aiResponse,
        question: question,
        ai_response: aiResponse,
        omi_response: omiResponse,
