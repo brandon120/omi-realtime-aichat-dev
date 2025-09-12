@@ -442,20 +442,8 @@ app.post('/omi-webhook', async (req, res) => {
          rateLimitInfo = getRateLimitStatus(session_id);
          console.log('⚠️ Rate limit exceeded for user:', session_id, rateLimitInfo);
          
-         // Still return the AI response, but note the rate limit
-         res.status(200).json({
-           success: true,
-           message: "rate limit", //todo
-           question: question,
-           ai_response: aiResponse,
-           omi_response: null,
-           rate_limit_warning: {
-             message: `AI response generated but notification not sent due to rate limit.`,
-             rate_limit: rateLimitInfo,
-             retry_after: `${rateLimitInfo.timeUntilReset} minutes`
-           },
-           session_id: session_id
-         });
+         // Rate limited - return non-talking response (AI response already generated but not sent)
+         res.status(204).send(); // No Content - rate limited, no notification sent
          
          // Clear the session transcript after response
          sessionTranscripts.delete(session_id);
@@ -471,15 +459,8 @@ app.post('/omi-webhook', async (req, res) => {
      sessionTranscripts.delete(session_id);
      console.log('🧹 Cleared session transcript for:', session_id);
      
-     // Return success response
-     res.status(200).json({
-       success: true,
-       message: "success", //todo
-       question: question,
-       ai_response: aiResponse,
-       omi_response: omiResponse,
-       session_id: session_id
-     });
+     // Return success response (non-talking to avoid duplicate messages)
+     res.status(204).send(); // No Content - notification already sent via sendOmiNotification
     
   } catch (error) {
     console.error('❌ Error processing webhook:', error);
