@@ -1,50 +1,24 @@
 # Omi Real-Time AI Chat Plugin
 
-A Node.js Express backend plugin for Omi that provides real-time AI chat capabilities using OpenAI's GPT-4 model with web search. When users say "hey omi" followed by a question, the plugin automatically processes the question through GPT-4 and sends the response back to the user via Omi's notification system.
+A Node.js backend plugin for Omi that provides real-time AI chat capabilities using OpenAI's GPT-4 model. When users say "hey omi" followed by a question, the plugin automatically processes the question through GPT-4 and sends the response back to the user via Omi's notification system.
 
-## Architecture Overview
-
-```
-┌─────────────┐    ┌─────────────────┐    ┌─────────────┐    ┌─────────────┐
-│   Omi AI   │───▶│  Express Server │───▶│  OpenAI    │───▶│   Omi      │
-│  Webhook   │    │                 │    │  GPT-4o    │    │Notification│
-└─────────────┘    └─────────────────┘    └─────────────┘    └─────────────┘
-                          │
-                          ▼
-                   ┌─────────────────┐
-                   │ Session Manager │
-                   │ Rate Limiter    │
-                   │ Transcript Store│
-                   └─────────────────┘
-```
-
-### **Core Components**
-- **Webhook Handler**: Processes incoming Omi transcript data
-- **AI Service**: Manages OpenAI API interactions with web search
-- **Notification Service**: Handles Omi API communication
-- **Session Manager**: Tracks conversation context and cleanup
-- **Rate Limiter**: Prevents API abuse (10 notifications/hour per user)
-
-## Features
+## 🚀 Features
 
 - **Voice Activation**: Listens for transcripts starting with "hey omi"
-- **Smart Detection**: Natural language processing for AI interaction detection
-- **GPT-4o Integration**: Uses OpenAI's latest model with web search capabilities
+- **GPT-4 Integration**: Uses OpenAI's latest GPT-4 model for intelligent responses
 - **Real-time Notifications**: Sends responses back to users through Omi's notification API
-- **Rate Limiting**: Intelligent rate limiting to prevent API errors
-- **Session Management**: Maintains conversation context and automatic cleanup
 - **Error Handling**: Comprehensive error handling and logging
-- **Health Monitoring**: Built-in health check and monitoring endpoints
-- **Railway Ready**: Optimized for Railway deployment with auto-scaling
+- **Health Monitoring**: Built-in health check endpoint
+- **Railway Ready**: Optimized for Railway deployment
 
-## Prerequisites
+## 📋 Prerequisites
 
 - Node.js 18+ installed
-- OpenAI API key with GPT-4o access
+- OpenAI API key
 - Omi App ID and App Secret
 - Railway account (for deployment)
 
-## Local Setup
+## 🛠️ Local Setup
 
 ### 1. Clone and Install Dependencies
 
@@ -106,7 +80,7 @@ curl -X POST http://localhost:3000/omi-webhook \
   }'
 ```
 
-## Railway Deployment
+## 🚀 Railway Deployment
 
 ### 1. Install Railway CLI
 
@@ -148,7 +122,7 @@ railway domain
 
 Your webhook URL will be: `https://your-app-name.railway.app/omi-webhook`
 
-## Omi Plugin Registration
+## 🔌 Omi Plugin Registration
 
 ### 1. Access Omi Plugin Dashboard
 
@@ -158,9 +132,9 @@ Your webhook URL will be: `https://your-app-name.railway.app/omi-webhook`
 ### 2. Plugin Configuration
 
 - **Plugin Name**: Omi AI Chat
-- **Description**: Real-time AI chat using GPT-4 with web search
+- **Description**: Real-time AI chat using GPT-4
 - **Webhook URL**: `https://your-app-name.railway.app/omi-webhook`
-- **Trigger Phrase**: `hey omi` (or natural language questions)
+- **Trigger Phrase**: `hey omi`
 - **Permissions**: 
   - Read transcripts
   - Send notifications
@@ -171,10 +145,10 @@ The plugin expects webhook payloads in this format:
 
 ```json
 {
-  "session_id": "session_abc123xyz789",
+  "session_id": "o0qOP4YkbEUWKE3Vk0hXMnVzH9I3",
   "segments": [
     {
-      "id": "seg_abc123def456",
+      "id": "6b0b382f-cb57-465c-88e6-baa8de28c455",
       "text": "What's the weather like in Sydney?",
       "speaker": "SPEAKER_1",
       "speaker_id": 1,
@@ -196,36 +170,28 @@ The plugin responds with:
   "message": "Question processed and response sent to Omi",
   "question": "what is artificial intelligence?",
   "ai_response": "Artificial intelligence (AI) is...",
-  "omi_response": { "status": "success" },
-  "session_id": "session_abc123xyz789"
+  "omi_status": 200
 }
 ```
 
-## API Reference
+## 📊 Monitoring and Health Checks
 
-### Health Check
+### Health Check Endpoint
+
 ```
 GET /health
 ```
-Returns server status, configuration, and rate limiting information.
 
-### Help & Instructions
-```
-GET /help
-```
-Provides usage instructions, trigger phrases, and examples.
+Returns server status and confirms the plugin is running.
 
-### Rate Limit Status
-```
-GET /rate-limit/:userId
-```
-Shows rate limit status for a specific user.
+### Logging
 
-### Main Webhook
-```
-POST /omi-webhook
-```
-Processes incoming Omi transcript data and generates AI responses.
+The plugin provides comprehensive logging:
+- 📥 Incoming webhooks
+- 🤖 AI processing status
+- 📤 Omi notification status
+- ❌ Error details
+- ⚠️ Environment variable warnings
 
 ## 🔧 Configuration Options
 
@@ -241,10 +207,10 @@ Processes incoming Omi transcript data and generates AI responses.
 ### OpenAI Configuration
 
 The plugin uses these GPT-4 settings:
-- **Model**: `gpt-4o` (latest with web search)
-- **Web Search**: Built-in `web_search_preview` tool
-- **Fallback**: Regular chat completion if Responses API fails
-- **System Prompt**: Optimized for helpful, accurate responses
+- **Model**: `gpt-4`
+- **Max Tokens**: 500
+- **Temperature**: 0.7
+- **System Prompt**: "You are a helpful AI assistant. Provide clear, concise, and helpful responses."
 
 ### Omi API Configuration
 
@@ -254,25 +220,23 @@ The plugin uses Omi's official notification API:
 - **Authentication**: Bearer token with App Secret
 - **Parameters**: `uid` and `message` as query parameters
 
-## Error Handling
+## 🚨 Error Handling
 
 The plugin handles various error scenarios:
 
 - **Missing Fields**: Returns 400 for incomplete webhook data
 - **API Errors**: Handles OpenAI and Omi API errors gracefully
-- **Rate Limiting**: Prevents notification spam with intelligent limits
 - **Network Issues**: Retries and provides clear error messages
-- **Validation**: Ensures transcripts contain valid AI interaction triggers
+- **Validation**: Ensures transcripts start with "hey omi"
 
-## Security Considerations
+## 🔒 Security Considerations
 
 - API keys are stored as environment variables
 - Input validation prevents malicious payloads
 - HTTPS enforced in production (Railway)
-- Rate limiting prevents API abuse
-- Session cleanup prevents memory leaks
+- Rate limiting can be added if needed
 
-## Testing
+## 🧪 Testing
 
 ### Manual Testing
 
@@ -284,23 +248,18 @@ The plugin handles various error scenarios:
 ### Automated Testing
 
 ```bash
-# Test OpenAI Responses API integration
-node test-responses-api.js
-
-# Test rate limiting functionality
-node test-rate-limit.js
+# Run tests (if implemented)
+npm test
 ```
 
-## Scaling and Performance
+## 📈 Scaling and Performance
 
 - **Stateless**: No database dependencies
 - **Async Processing**: Non-blocking webhook handling
 - **Railway Auto-scaling**: Automatically scales based on traffic
 - **Response Time**: Typically 2-5 seconds for full request cycle
-- **Memory Management**: Automatic session and rate limit cleanup
-- **Web Search**: Built-in for current information without external APIs
 
-## Troubleshooting
+## 🆘 Troubleshooting
 
 ### Common Issues
 
@@ -311,7 +270,7 @@ node test-rate-limit.js
 2. **OpenAI API Errors**
    - Verify API key is valid
    - Check OpenAI account has credits
-   - Ensure API key has GPT-4o access
+   - Ensure API key has GPT-4 access
 
 3. **Omi Notification Failures**
    - Verify Omi App ID and App Secret are correct
@@ -323,10 +282,6 @@ node test-rate-limit.js
    - Check Railway deployment status
    - Test with health check endpoint
 
-5. **Rate Limiting Issues**
-   - Check `/rate-limit/:userId` endpoint
-   - Wait for hourly reset or implement higher limits
-
 ### Debug Mode
 
 Enable verbose logging by setting:
@@ -335,16 +290,7 @@ Enable verbose logging by setting:
 railway variables set DEBUG=true
 ```
 
-## Future Enhancements
-
-- **Modular Architecture**: Separate services for AI, notifications, and sessions
-- **Plugin System**: Support for custom AI tools and integrations
-- **Multi-Platform**: Slack, Discord, and other chat platform support
-- **User Management**: Session tracking and user preferences
-- **Analytics**: Usage metrics and performance monitoring
-- **Caching**: Redis integration for improved response times
-
-## Contributing
+## 🤝 Contributing
 
 1. Fork the repository
 2. Create a feature branch
@@ -352,11 +298,11 @@ railway variables set DEBUG=true
 4. Test thoroughly
 5. Submit a pull request
 
-## License
+## 📄 License
 
 MIT License - see LICENSE file for details
 
-## Support
+## 🆘 Support
 
 For issues and questions:
 - Check the troubleshooting section above
@@ -366,3 +312,4 @@ For issues and questions:
 
 ---
 
+**Happy coding with Omi! 🎉**
