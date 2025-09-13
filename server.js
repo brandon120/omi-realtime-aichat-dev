@@ -2,6 +2,17 @@ const express = require('express');
 const https = require('https');
 const OpenAI = require('openai');
 require('dotenv').config();
+const ENABLE_USER_SYSTEM = String(process.env.ENABLE_USER_SYSTEM || 'false').toLowerCase() === 'true';
+let prisma = null;
+if (ENABLE_USER_SYSTEM) {
+  try {
+    const { PrismaClient } = require('@prisma/client');
+    prisma = new PrismaClient();
+    console.log('✅ Prisma initialized');
+  } catch (e) {
+    console.error('❌ Failed to initialize Prisma (user system disabled):', e.message);
+  }
+}
 
 /**
  * Omi AI Chat Plugin Server
@@ -310,6 +321,19 @@ app.get('/health', (req, res) => {
     }
   });
 });
+
+// DB health endpoint (feature-flagged)
+if (ENABLE_USER_SYSTEM) {
+  app.get('/health/db', async (req, res) => {
+    try {
+      if (!prisma) return res.status(500).json({ ok: false, error: 'Prisma not initialized' });
+      await prisma.$queryRaw`SELECT 1 as ok`;
+      res.status(200).json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+}
 
 // Help endpoint
 app.get('/help', (req, res) => {
@@ -703,9 +727,15 @@ app.listen(PORT, async () => {
   console.log('🚀 Omi AI Chat Plugin server started');
   console.log(`📍 Server running on port ${PORT}`);
   console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+  if (ENABLE_USER_SYSTEM) {
+    console.log(`🩺 DB health: http://localhost:${PORT}/health/db`);
+  }
   console.log(`📖 Help & instructions: http://localhost:${PORT}/help`);
   console.log(`📡 Webhook endpoint: http://localhost:${PORT}/omi-webhook`);
-  
+  if (ENABLE_USER_SYSTEM && !process.env.DATABASE_URL) {
+    console.warn('⚠️  DATABASE_URL is not set (user system enabled)');
+  }
+
   // Check environment variables (Updated)
   if (!process.env.OPENAI_API_KEY && !process.env.OPENAI_KEY) {
     console.warn('⚠️  OPENAI_API_KEY (or OPENAI_KEY) environment variable is not set');
