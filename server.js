@@ -1,6 +1,8 @@
 const express = require('express');
 const https = require('https');
 const OpenAI = require('openai');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 /**
@@ -40,6 +42,52 @@ const sessionTranscripts = new Map();
 const sessionConversations = new Map();
 // Last processed question per session to prevent duplicate triggers
 const lastProcessedQuestion = new Map();
+
+// Persistent storage for conversation mapping
+const DATA_DIR = path.join(__dirname, 'data');
+const CONVERSATIONS_FILE = path.join(DATA_DIR, 'session_conversations.json');
+
+function ensureDataDir() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  } catch (_) {}
+}
+
+function loadConversationMapFromDisk() {
+  try {
+    ensureDataDir();
+    if (!fs.existsSync(CONVERSATIONS_FILE)) {
+      return;
+    }
+    const fileContent = fs.readFileSync(CONVERSATIONS_FILE, 'utf8');
+    if (!fileContent) return;
+    const parsed = JSON.parse(fileContent);
+    if (parsed && typeof parsed === 'object') {
+      for (const [sessionId, conversationId] of Object.entries(parsed)) {
+        if (typeof sessionId === 'string' && typeof conversationId === 'string') {
+          sessionConversations.set(sessionId, conversationId);
+        }
+      }
+      console.log('💾 Loaded conversation map from disk:', sessionConversations.size, 'entries');
+    }
+  } catch (e) {
+    console.warn('⚠️ Failed to load conversation map from disk:', e?.message || e);
+  }
+}
+
+function saveConversationMapToDisk() {
+  try {
+    ensureDataDir();
+    const asObject = Object.fromEntries(sessionConversations.entries());
+    const tempFile = CONVERSATIONS_FILE + '.tmp';
+    fs.writeFileSync(tempFile, JSON.stringify(asObject, null, 2), 'utf8');
+    fs.renameSync(tempFile, CONVERSATIONS_FILE);
+    // Optional log to avoid spamming; keep concise
+    console.log('💾 Saved conversation map to disk:', Object.keys(asObject).length, 'entries');
+  } catch (e) {
+    console.warn('⚠️ Failed to save conversation map to disk:', e?.message || e);
+  }
+}
 
 // Helpers for duplicate detection
 function normalizeText(text) {
@@ -434,6 +482,7 @@ app.post('/omi-webhook', async (req, res) => {
         });
         conversationId = conversation.id;
         sessionConversations.set(session_id, conversationId);
+        saveConversationMapToDisk();
         console.log('🧵 Created OpenAI conversation for session:', session_id, conversationId);
       } catch (convErr) {
         console.warn('⚠️ Failed to create OpenAI conversation, proceeding without conversation state:', convErr?.message || convErr);
@@ -539,6 +588,9 @@ app.listen(PORT, async () => {
   console.log(`📖 Help & instructions: http://localhost:${PORT}/help`);
   console.log(`📡 Webhook endpoint: http://localhost:${PORT}/omi-webhook`);
   
+  // Load persisted conversation mapping
+  loadConversationMapFromDisk();
+  
   // Check environment variables (Updated)
   if (!process.env.OPENAI_API_KEY && !process.env.OPENAI_KEY) {
     console.warn('⚠️  OPENAI_API_KEY (or OPENAI_KEY) environment variable is not set');
@@ -591,4 +643,16 @@ app.listen(PORT, async () => {
    }, RATE_LIMIT_WINDOW); // 1 hour
   
   console.log('✅ Server ready to receive Omi webhooks');
+});
+
+// Graceful shutdown: persist conversation mapping
+process.on('SIGINT', () => {
+  console.log('\nSIGINT received. Saving conversation map and shutting down...');
+  try { saveConversationMapToDisk(); } catch (_) {}
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  console.log('\nSIGTERM received. Saving conversation map and shutting down...');
+  try { saveConversationMapToDisk(); } catch (_) {}
+  process.exit(0);
 });
