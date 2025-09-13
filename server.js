@@ -69,6 +69,32 @@ const notificationQueue = [];
 const notificationHistory = new Map(); // Track notifications per user
 const MAX_NOTIFICATIONS_PER_HOUR = 10;
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour in milliseconds
+// Follow-up detection state: allow natural follow-ups without trigger phrases
+const sessionFollowUpState = new Map(); // session_id -> { expiresAt }
+const FOLLOW_UP_WINDOW_MS = parseInt(process.env.FOLLOW_UP_WINDOW_MS || '60000', 10);
+
+// Detect if a message looks like a follow-up request for more info
+function looksLikeFollowUpMessage(text) {
+  if (!text) return false;
+  const lower = text.toLowerCase().trim();
+  if (!lower) return false;
+  // Questions are almost always follow-ups in the window
+  if (/[?]\s*$/.test(lower)) return true;
+
+  const followUpPatterns = [
+    /(tell me more|more info|more information|elaborate|explain|expand|details|detail|specifics|examples|example)/i,
+    /(what about|how about|and what about|anything else|what else)/i,
+    /(go deeper|deeper|in depth|further)/i,
+    /(why though|how so|why so)/i,
+    /(source|sources|citations|references|link|links)/i
+  ];
+  return followUpPatterns.some((re) => re.test(text));
+}
+
+function isPoliteAcknowledgement(text) {
+  if (!text) return false;
+  return /(thanks|thank you|ok|okay|cool|great|awesome|got it|sounds good|nice)\b/i.test(text);
+}
 
 // Initialize OpenAI client (prefer OPENAI_API_KEY per latest SDK docs)
 const openai = new OpenAI({
@@ -306,7 +332,12 @@ app.get('/health', (req, res) => {
       type: 'OpenAI Responses API',
       model: OPENAI_MODEL,
       conversation_state: 'enabled (server-managed conversation id per Omi session)',
-      tools: ['web_search']
+      tools: ['web_search'],
+      follow_up: {
+        window_ms: FOLLOW_UP_WINDOW_MS,
+        enabled: true,
+        active_sessions: Array.from(sessionFollowUpState.keys()).length
+      }
     }
   });
 });
@@ -475,9 +506,20 @@ app.post('/omi-webhook', async (req, res) => {
     const isAskingForHelp = helpKeywords.some(keyword => 
       transcriptLower.includes(keyword)
     );
+
+    // Follow-up window handling
+    const followUpInfo = sessionFollowUpState.get(session_id);
+    const isFollowUpActive = !!(followUpInfo && followUpInfo.expiresAt > Date.now());
+    if (isFollowUpActive && isPoliteAcknowledgement(fullTranscript)) {
+      // Treat acknowledgements as end of thread during follow-up window
+      sessionTranscripts.delete(session_id);
+      sessionFollowUpState.delete(session_id);
+      console.log('🙏 Acknowledgement detected during follow-up window. Ending conversation gracefully.');
+      return res.status(200).json({});
+    }
     
     // Determine if user wants AI interaction
-    const wantsAIInteraction = hasTriggerPhrase || (isQuestion && isCommand) || (isConversational && isCommand);
+    const wantsAIInteraction = hasTriggerPhrase || (isQuestion && isCommand) || (isConversational && isCommand) || (isFollowUpActive && looksLikeFollowUpMessage(fullTranscript));
     
     if (!wantsAIInteraction) {
       if (isAskingForHelp) {
@@ -646,10 +688,20 @@ app.post('/omi-webhook', async (req, res) => {
          }
      }
     
+    // Set follow-up window so short clarifications can be captured without trigger phrases
+    sessionFollowUpState.set(session_id, { expiresAt: Date.now() + FOLLOW_UP_WINDOW_MS });
+
     // Return response so Omi shows content in chat and sends a single notification
     sessionTranscripts.delete(session_id);
     console.log('🧹 Cleared session transcript for:', session_id);
-    return res.status(200).json({ message: aiResponse });
+    return res.status(200).json({ 
+      message: aiResponse,
+      follow_up: {
+        enabled: true,
+        window_ms: FOLLOW_UP_WINDOW_MS,
+        hint: 'You can ask a quick follow-up like "what about pricing?"'
+      }
+    });
     
   } catch (error) {
     console.error('❌ Error processing webhook:', error);
@@ -756,6 +808,16 @@ app.listen(PORT, async () => {
        }
      }
    }, RATE_LIMIT_WINDOW); // 1 hour
+   
+  // Follow-up window cleanup every minute
+  setInterval(() => {
+    const now = Date.now();
+    for (const [sid, info] of sessionFollowUpState.entries()) {
+      if (!info || info.expiresAt <= now) {
+        sessionFollowUpState.delete(sid);
+      }
+    }
+  }, 60 * 1000);
   
   console.log('✅ Server ready to receive Omi webhooks');
 });
