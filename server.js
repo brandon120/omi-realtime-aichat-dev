@@ -36,8 +36,6 @@ const PORT = process.env.PORT || 3000;
 
 // Session storage to accumulate transcript segments
 const sessionTranscripts = new Map();
-// Conversation state per Omi session (OpenAI conversation id)
-const sessionConversations = new Map();
 // Last processed question per session to prevent duplicate triggers
 const lastProcessedQuestion = new Map();
 
@@ -215,8 +213,7 @@ app.get('/health', (req, res) => {
     api: {
       type: 'OpenAI Responses API',
       model: OPENAI_MODEL,
-      web_search: 'web_search_preview tool enabled',
-      conversation_state: 'enabled (server-managed conversation id per Omi session)'
+      web_search: 'web_search_preview tool enabled'
     }
   });
 });
@@ -427,32 +424,13 @@ app.post('/omi-webhook', async (req, res) => {
     
     let aiResponse = '';
     
-    // Ensure a valid OpenAI conversation id for this Omi session
-    let conversationId = sessionConversations.get(session_id);
-    if (!conversationId) {
-      try {
-        const conversation = await openai.conversations.create({
-          metadata: { omi_session_id: String(session_id) }
-        });
-        conversationId = conversation.id;
-        sessionConversations.set(session_id, conversationId);
-        console.log('🧵 Created OpenAI conversation for session:', session_id, conversationId);
-      } catch (convErr) {
-        console.warn('⚠️ Failed to create OpenAI conversation, proceeding without conversation state:', convErr?.message || convErr);
-      }
-    }
-    
     try {
         // Use the new Responses API with web search
-        const requestPayload = {
+        const response = await openai.responses.create({
           model: OPENAI_MODEL,
           tools: [WEB_SEARCH_TOOL],
-          input: question,
-        };
-        if (conversationId) {
-          requestPayload.conversation = conversationId;
-        }
-        const response = await openai.responses.create(requestPayload);
+          input: question
+        });
         
         aiResponse = response.output_text;
         console.log('✨ OpenAI Responses API response:', aiResponse);
