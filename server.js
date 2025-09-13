@@ -427,23 +427,38 @@ app.post('/omi-webhook', async (req, res) => {
     
     let aiResponse = '';
     
-    // Ensure stable conversation id for this Omi session
-    if (!sessionConversations.has(session_id)) {
-      sessionConversations.set(session_id, `omi-${session_id}`);
+    // Manage OpenAI conversation id for this Omi session
+    let conversationId = sessionConversations.get(session_id);
+    // If an old/invalid id is present (not starting with conv_), drop it
+    if (conversationId && !/^conv_/.test(conversationId)) {
+      sessionConversations.delete(session_id);
+      conversationId = undefined;
     }
-    const conversationId = sessionConversations.get(session_id);
     
     try {
         // Use the new Responses API with web search
-        const response = await openai.responses.create({
+        const responsePayload = {
             model: OPENAI_MODEL,
             tools: [WEB_SEARCH_TOOL],
             input: question,
-            conversation: conversationId,
-        });
+        };
+        if (conversationId) {
+            responsePayload.conversation = conversationId;
+        }
+        const response = await openai.responses.create(responsePayload);
         
         aiResponse = response.output_text;
         console.log('✨ OpenAI Responses API response:', aiResponse);
+        
+        // Persist the conversation id for follow-ups
+        if (response && response.conversation) {
+            const returnedConversationId = typeof response.conversation === 'string'
+              ? response.conversation
+              : response.conversation.id;
+            if (returnedConversationId && /^conv_/.test(returnedConversationId)) {
+              sessionConversations.set(session_id, returnedConversationId);
+            }
+        }
         
         // Log additional response data for debugging
         if (response.tool_use && response.tool_use.length > 0) {
