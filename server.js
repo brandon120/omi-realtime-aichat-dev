@@ -76,7 +76,7 @@ const openai = new OpenAI({
 });
 
 // OpenAI Responses API configuration
-const OPENAI_MODEL = "gpt-4o-mini"; // Smaller/cheaper, supports conversation state
+const OPENAI_MODEL = "gpt-5-mini-2025-08-07"; // Smaller/cheaper, supports conversation state
 
 // No need to create an assistant - Responses API handles everything
 console.log('✅ Using OpenAI Responses API with Conversations');
