@@ -1,5 +1,6 @@
 const express = require('express');
 const https = require('https');
+const fs = require('fs');
 const OpenAI = require('openai');
 require('dotenv').config();
 
@@ -38,6 +39,82 @@ const PORT = process.env.PORT || 3000;
 const sessionTranscripts = new Map();
 // Conversation state per Omi session (OpenAI conversation id)
 const sessionConversations = new Map();
+// Track in-flight conversation creations to avoid races/duplicates
+const conversationCreationPromises = new Map();
+// Optional persistence for conversation mapping (survives process restarts if FS is persistent)
+const CONVERSATIONS_PERSIST_PATH = process.env.CONVERSATIONS_PERSIST_PATH || './conversations.json';
+
+function loadSessionConversationsFromDisk() {
+  try {
+    if (fs.existsSync(CONVERSATIONS_PERSIST_PATH)) {
+      const raw = fs.readFileSync(CONVERSATIONS_PERSIST_PATH, 'utf8');
+      if (raw && raw.trim()) {
+        const obj = JSON.parse(raw);
+        if (obj && typeof obj === 'object') {
+          for (const [key, value] of Object.entries(obj)) {
+            if (typeof key === 'string' && typeof value === 'string') {
+              sessionConversations.set(key, value);
+            }
+          }
+          console.log('💾 Loaded conversation mappings from disk:', CONVERSATIONS_PERSIST_PATH, `(count=${sessionConversations.size})`);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('⚠️ Failed to load conversation mappings:', e?.message || e);
+  }
+}
+
+let persistTimer = null;
+function schedulePersistSessionConversations() {
+  try {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      try {
+        const obj = Object.fromEntries(sessionConversations.entries());
+        const tmpPath = `${CONVERSATIONS_PERSIST_PATH}.tmp`;
+        fs.writeFileSync(tmpPath, JSON.stringify(obj, null, 2), 'utf8');
+        fs.renameSync(tmpPath, CONVERSATIONS_PERSIST_PATH);
+        // console.log('💾 Persisted conversation mappings to disk:', CONVERSATIONS_PERSIST_PATH);
+      } catch (e) {
+        console.warn('⚠️ Failed to persist conversation mappings:', e?.message || e);
+      }
+    }, 250);
+  } catch (e) {
+    console.warn('⚠️ Failed to schedule persistence:', e?.message || e);
+  }
+}
+
+async function getOrCreateConversationId(omiSessionId) {
+  // Return cached if present
+  const existing = sessionConversations.get(omiSessionId);
+  if (existing) return existing;
+
+  // Coalesce concurrent creators
+  const inFlight = conversationCreationPromises.get(omiSessionId);
+  if (inFlight) return inFlight;
+
+  const createPromise = (async () => {
+    try {
+      const conversation = await openai.conversations.create({
+        metadata: { omi_session_id: String(omiSessionId) }
+      });
+      const id = conversation.id;
+      sessionConversations.set(omiSessionId, id);
+      schedulePersistSessionConversations();
+      console.log('🧵 Created OpenAI conversation for session:', omiSessionId, id);
+      return id;
+    } catch (convErr) {
+      console.warn('⚠️ Failed to create OpenAI conversation, proceeding without conversation state:', convErr?.message || convErr);
+      return undefined;
+    } finally {
+      conversationCreationPromises.delete(omiSessionId);
+    }
+  })();
+
+  conversationCreationPromises.set(omiSessionId, createPromise);
+  return createPromise;
+}
 // Last processed question per session to prevent duplicate triggers
 const lastProcessedQuestion = new Map();
 
@@ -80,6 +157,9 @@ const OPENAI_MODEL = "gpt-5-mini-2025-08-07"; // Smaller/cheaper, supports conve
 
 // No need to create an assistant - Responses API handles everything
 console.log('✅ Using OpenAI Responses API with Conversations');
+
+// Load persisted conversation mappings on startup
+loadSessionConversationsFromDisk();
 
 /**
  * Sends a direct notification to an Omi user with rate limiting.
@@ -425,20 +505,8 @@ app.post('/omi-webhook', async (req, res) => {
     
     let aiResponse = '';
     
-    // Ensure a valid OpenAI conversation id for this Omi session
-    let conversationId = sessionConversations.get(session_id);
-    if (!conversationId) {
-      try {
-        const conversation = await openai.conversations.create({
-          metadata: { omi_session_id: String(session_id) }
-        });
-        conversationId = conversation.id;
-        sessionConversations.set(session_id, conversationId);
-        console.log('🧵 Created OpenAI conversation for session:', session_id, conversationId);
-      } catch (convErr) {
-        console.warn('⚠️ Failed to create OpenAI conversation, proceeding without conversation state:', convErr?.message || convErr);
-      }
-    }
+    // Ensure a valid OpenAI conversation id for this Omi session (reused/persistent)
+    let conversationId = await getOrCreateConversationId(session_id);
     
     try {
         // Use the new Responses API (no preview web search tool)
@@ -455,29 +523,66 @@ app.post('/omi-webhook', async (req, res) => {
         console.log('✨ OpenAI Responses API response:', aiResponse);
         
     } catch (error) {
-         console.error('❌ OpenAI Responses API error:', error);
-         
-         // Fallback to regular chat completion if Responses API fails
-         try {
-             const openaiResponse = await openai.chat.completions.create({
-                 model: 'gpt-4o',
-                 messages: [
-                     { 
-                         role: 'system', 
-                         content: 'You are a helpful AI assistant. When users ask about current events, weather, news, or time-sensitive information, be honest about your knowledge cutoff and suggest they check reliable sources for the most up-to-date information. For general knowledge questions, provide helpful and accurate responses.' 
-                     },
-                     { role: 'user', content: question }
-                 ],
-                 max_tokens: 800,
-                 temperature: 0.7,
-             });
-             aiResponse = openaiResponse.choices[0].message.content;
-             console.log('✨ Fallback OpenAI response:', aiResponse);
-         } catch (fallbackError) {
-             console.error('❌ Fallback also failed:', fallbackError);
-             aiResponse = "I'm sorry, I'm experiencing technical difficulties. Please try again later.";
-         }
-     }
+        console.error('❌ OpenAI Responses API error:', error);
+        const msg = error?.message || '';
+        const looksLikeConversationIssue = conversationId && /conversation/i.test(msg) && /(not found|invalid|expired|does not exist)/i.test(msg);
+        if (looksLikeConversationIssue) {
+          try {
+            console.warn('🔁 Conversation invalid. Recreating conversation and retrying once...');
+            sessionConversations.delete(session_id);
+            schedulePersistSessionConversations();
+            const newConversationId = await getOrCreateConversationId(session_id);
+            const retryPayload = { model: OPENAI_MODEL, input: question };
+            if (newConversationId) retryPayload.conversation = newConversationId;
+            const retryResponse = await openai.responses.create(retryPayload);
+            aiResponse = retryResponse.output_text;
+            console.log('✨ OpenAI Responses API response after retry:', aiResponse);
+          } catch (retryErr) {
+            console.error('❌ Retry with new conversation failed:', retryErr);
+            // Fallback to regular chat completion
+            try {
+              const openaiResponse = await openai.chat.completions.create({
+                  model: 'gpt-4o',
+                  messages: [
+                      { 
+                          role: 'system', 
+                          content: 'You are a helpful AI assistant. When users ask about current events, weather, news, or time-sensitive information, be honest about your knowledge cutoff and suggest they check reliable sources for the most up-to-date information. For general knowledge questions, provide helpful and accurate responses.' 
+                      },
+                      { role: 'user', content: question }
+                  ],
+                  max_tokens: 800,
+                  temperature: 0.7,
+              });
+              aiResponse = openaiResponse.choices[0].message.content;
+              console.log('✨ Fallback OpenAI response:', aiResponse);
+            } catch (fallbackError) {
+              console.error('❌ Fallback also failed:', fallbackError);
+              aiResponse = "I'm sorry, I'm experiencing technical difficulties. Please try again later.";
+            }
+          }
+        } else {
+          // Fallback to regular chat completion if Responses API fails for non-conversation reasons
+          try {
+              const openaiResponse = await openai.chat.completions.create({
+                  model: 'gpt-4o',
+                  messages: [
+                      { 
+                          role: 'system', 
+                          content: 'You are a helpful AI assistant. When users ask about current events, weather, news, or time-sensitive information, be honest about your knowledge cutoff and suggest they check reliable sources for the most up-to-date information. For general knowledge questions, provide helpful and accurate responses.' 
+                      },
+                      { role: 'user', content: question }
+                  ],
+                  max_tokens: 800,
+                  temperature: 0.7,
+              });
+              aiResponse = openaiResponse.choices[0].message.content;
+              console.log('✨ Fallback OpenAI response:', aiResponse);
+          } catch (fallbackError) {
+              console.error('❌ Fallback also failed:', fallbackError);
+              aiResponse = "I'm sorry, I'm experiencing technical difficulties. Please try again later.";
+          }
+        }
+    }
     
     // Return response so Omi shows content in chat and sends a single notification
     sessionTranscripts.delete(session_id);
