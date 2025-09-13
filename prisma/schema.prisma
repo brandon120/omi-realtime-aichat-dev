@@ -72,6 +72,8 @@ model OmiUserLink {
   omiUserId         String   @unique
   isVerified        Boolean  @default(false)
   verificationCode  String?
+  verificationExpiresAt DateTime?
+  verificationAttempts  Int      @default(0)
   verifiedAt        DateTime?
   createdAt         DateTime @default(now())
 
@@ -112,6 +114,7 @@ model Conversation {
   @@index([userId])
   @@index([omiSessionId])
   @@index([openaiConversationId])
+  @@unique([omiSessionId, openaiConversationId])
 }
 
 model Message {

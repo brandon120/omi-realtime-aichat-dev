@@ -4,6 +4,7 @@ const OpenAI = require('openai');
 require('dotenv').config();
 const cookieParser = require('cookie-parser');
 const argon2 = require('argon2');
+const crypto = require('crypto');
  
 const ENABLE_USER_SYSTEM = String(process.env.ENABLE_USER_SYSTEM || 'false').toLowerCase() === 'true';
 let prisma = null;
@@ -342,6 +343,33 @@ function getSidFromRequest(req) {
   return signedSid || plainSid;
 }
 
+// ---- Linking helpers (feature-flagged) ----
+const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const MAX_OTP_ATTEMPTS = 5;
+
+function generateOtpCode() {
+  const num = Math.floor(Math.random() * 1000000);
+  return String(num).padStart(6, '0');
+}
+
+// Simple in-memory throttle for /link/*
+const linkRateHistory = new Map();
+function linkThrottle(limit = 5, windowMs = 60 * 1000) {
+  return (req, res, next) => {
+    const keyBase = (req.user && req.user.id) ? `u:${req.user.id}` : `ip:${req.ip}`;
+    const key = `${keyBase}:${req.path}`;
+    const now = Date.now();
+    const history = linkRateHistory.get(key) || [];
+    const recent = history.filter((ts) => now - ts < windowMs);
+    if (recent.length >= limit) {
+      return res.status(429).json({ error: 'Too many requests. Please try again later.' });
+    }
+    recent.push(now);
+    linkRateHistory.set(key, recent);
+    next();
+  };
+}
+
 function requireAuth(req, res, next) {
   if (!ENABLE_USER_SYSTEM || !prisma) return res.status(503).json({ error: 'User system disabled' });
   const sid = getSidFromRequest(req);
@@ -525,6 +553,82 @@ if (ENABLE_USER_SYSTEM) {
   });
 }
 
+// --------- OMI linking routes (feature-flagged) ---------
+if (ENABLE_USER_SYSTEM) {
+  // Start linking: generate OTP and send notification
+  app.post('/link/omi/start', requireAuth, linkThrottle(5, 60 * 1000), async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const { omi_user_id } = req.body || {};
+      const omiUserId = (omi_user_id || '').toString().trim();
+      if (!omiUserId) return res.status(400).json({ error: 'omi_user_id is required' });
+
+      const code = generateOtpCode();
+      const expiresAt = new Date(Date.now() + OTP_TTL_MS);
+
+      const link = await prisma.omiUserLink.upsert({
+        where: { omiUserId },
+        update: { userId: req.user.id, verificationCode: code, verificationExpiresAt: expiresAt, verificationAttempts: 0, isVerified: false },
+        create: { userId: req.user.id, omiUserId, verificationCode: code, verificationExpiresAt: expiresAt }
+      });
+
+      try {
+        await sendOmiNotification(omiUserId, `Your verification code is ${code}. It expires in 10 minutes.`);
+      } catch (notifyErr) {
+        console.warn('Failed to send OMI notification, returning code for dev:', notifyErr?.message || notifyErr);
+      }
+
+      res.status(200).json({ ok: true, omi_user_id: omiUserId });
+    } catch (e) {
+      console.error('Link start error:', e);
+      res.status(500).json({ error: 'Failed to start OMI linking' });
+    }
+  });
+
+  // Confirm linking: verify OTP
+  app.post('/link/omi/confirm', requireAuth, linkThrottle(10, 60 * 1000), async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const { omi_user_id, code } = req.body || {};
+      const omiUserId = (omi_user_id || '').toString().trim();
+      const inputCode = (code || '').toString().trim();
+      if (!omiUserId || !inputCode) return res.status(400).json({ error: 'omi_user_id and code are required' });
+
+      const link = await prisma.omiUserLink.findUnique({ where: { omiUserId } });
+      if (!link || link.userId !== req.user.id) return res.status(404).json({ error: 'Link request not found' });
+      if (link.isVerified) return res.status(200).json({ ok: true, already_verified: true });
+      if (link.verificationAttempts >= MAX_OTP_ATTEMPTS) return res.status(429).json({ error: 'Too many attempts' });
+      if (!link.verificationCode || !link.verificationExpiresAt || link.verificationExpiresAt < new Date()) {
+        return res.status(400).json({ error: 'Verification code expired, please restart' });
+      }
+
+      const isValid = inputCode === link.verificationCode;
+      if (!isValid) {
+        await prisma.omiUserLink.update({
+          where: { omiUserId },
+          data: { verificationAttempts: { increment: 1 } }
+        });
+        return res.status(401).json({ error: 'Invalid code' });
+      }
+
+      await prisma.omiUserLink.update({
+        where: { omiUserId },
+        data: {
+          isVerified: true,
+          verifiedAt: new Date(),
+          verificationCode: null,
+          verificationExpiresAt: null,
+          verificationAttempts: 0
+        }
+      });
+
+      res.status(200).json({ ok: true });
+    } catch (e) {
+      console.error('Link confirm error:', e);
+      res.status(500).json({ error: 'Failed to confirm OMI linking' });
+    }
+  });
+}
 // Rate limit status endpoint
 app.get('/rate-limit/:userId', (req, res) => {
   const { userId } = req.params;
@@ -613,6 +717,69 @@ app.post('/omi-webhook', async (req, res) => {
     
     console.log('📝 Accumulated transcript for session:', fullTranscript);
     console.log('📊 Total segments in session:', sessionSegments.length);
+    
+    // Voice OTP verification flow (feature-flagged)
+    if (ENABLE_USER_SYSTEM && prisma) {
+      try {
+        // Look for patterns like: "verify 123456" (case-insensitive, allows extra words before/after)
+        const verifyMatch = fullTranscript.match(/\bverify\s+(\d{6})\b/i);
+        if (verifyMatch) {
+          const spokenCode = verifyMatch[1];
+          const omiUserId = req.body?.user_id;
+          if (!omiUserId) {
+            console.warn('Voice verify: missing user_id in webhook payload');
+            // Do not treat as error; just fall through to normal processing
+          } else {
+            const link = await prisma.omiUserLink.findUnique({ where: { omiUserId } });
+            if (link && !link.isVerified && link.verificationCode && link.verificationExpiresAt) {
+              const expired = link.verificationExpiresAt < new Date();
+              if (!expired && link.verificationAttempts < MAX_OTP_ATTEMPTS && link.verificationCode === spokenCode) {
+                // Mark verified
+                await prisma.omiUserLink.update({
+                  where: { omiUserId },
+                  data: {
+                    isVerified: true,
+                    verifiedAt: new Date(),
+                    verificationCode: null,
+                    verificationExpiresAt: null,
+                    verificationAttempts: 0
+                  }
+                });
+                // Attach active Omi session to this user
+                try {
+                  await prisma.omiSession.upsert({
+                    where: { omiSessionId: String(session_id) },
+                    update: { userId: link.userId, lastSeenAt: new Date() },
+                    create: { omiSessionId: String(session_id), userId: link.userId }
+                  });
+                } catch (attachErr) {
+                  console.warn('Failed to upsert/attach OmiSession:', attachErr?.message || attachErr);
+                }
+                sessionTranscripts.delete(session_id);
+                return res.status(200).json({ message: 'Verification successful. Your account is now linked.' });
+              } else if (expired) {
+                await prisma.omiUserLink.update({
+                  where: { omiUserId },
+                  data: { verificationCode: null, verificationExpiresAt: null }
+                });
+                sessionTranscripts.delete(session_id);
+                return res.status(200).json({ message: 'Your verification code expired. Please request a new code.' });
+              } else {
+                await prisma.omiUserLink.update({
+                  where: { omiUserId },
+                  data: { verificationAttempts: { increment: 1 } }
+                });
+                sessionTranscripts.delete(session_id);
+                return res.status(200).json({ message: 'That code was not correct. Please try again.' });
+              }
+            }
+          }
+        }
+      } catch (voiceErr) {
+        console.warn('Voice verification check failed:', voiceErr?.message || voiceErr);
+        // continue to normal handling
+      }
+    }
     
         // Smart AI interaction detection
     const transcriptLower = fullTranscript.toLowerCase();
@@ -760,9 +927,9 @@ app.post('/omi-webhook', async (req, res) => {
 
     // Use OpenAI Responses API with Conversations
     console.log('🤖 Using OpenAI Responses API (Conversations) for:', question);
-    
+
     let aiResponse = '';
-    
+
     // Ensure a valid OpenAI conversation id for this Omi session
     let conversationId = sessionConversations.get(session_id);
     if (!conversationId) {
@@ -777,50 +944,143 @@ app.post('/omi-webhook', async (req, res) => {
         console.warn('⚠️ Failed to create OpenAI conversation, proceeding without conversation state:', convErr?.message || convErr);
       }
     }
-    
-    try {
-        // Use the new Responses API (no preview web search tool)
-        const requestPayload = {
-          model: OPENAI_MODEL,
-          input: question,
-          tools: [
-            { type: 'web_search' }
-          ],
-          tool_choice: 'auto'
-        };
-        if (conversationId) {
-          requestPayload.conversation = conversationId;
+
+    // Persist webhook data (non-blocking; errors logged only)
+    if (ENABLE_USER_SYSTEM && prisma) {
+      (async () => {
+        try {
+          // Upsert omi_sessions
+          const payloadUserId = req.body?.user_id;
+          let linkedUserId = null;
+          if (payloadUserId) {
+            try {
+              const link = await prisma.omiUserLink.findUnique({ where: { omiUserId: String(payloadUserId) } });
+              if (link && link.isVerified) {
+                linkedUserId = link.userId;
+              }
+            } catch {}
+          }
+          await prisma.omiSession.upsert({
+            where: { omiSessionId: String(session_id) },
+            update: { lastSeenAt: new Date(), ...(linkedUserId ? { userId: linkedUserId } : {}) },
+            create: { omiSessionId: String(session_id), ...(linkedUserId ? { userId: linkedUserId } : {}) }
+          });
+
+          // Persist transcript segments uniquely
+          const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
+          if (sessionRow) {
+            for (const seg of segments) {
+              try {
+                await prisma.transcriptSegment.upsert({
+                  where: { omiSessionId_omiSegmentId: { omiSessionId: sessionRow.id, omiSegmentId: String(seg.id || seg.segment_id || crypto.createHash('sha1').update(String(seg.text || '')).digest('hex')) } },
+                  update: { text: String(seg.text || ''), speaker: seg.speaker || null, speakerId: seg.speaker_id ?? null, isUser: seg.is_user ?? null, start: seg.start ?? null, end: seg.end ?? null },
+                  create: { omiSessionId: sessionRow.id, omiSegmentId: String(seg.id || seg.segment_id || crypto.createHash('sha1').update(String(seg.text || '')).digest('hex')), text: String(seg.text || ''), speaker: seg.speaker || null, speakerId: seg.speaker_id ?? null, isUser: seg.is_user ?? null, start: seg.start ?? null, end: seg.end ?? null }
+                });
+              } catch (segErr) {
+                console.warn('Transcript segment persist error:', segErr?.message || segErr);
+              }
+            }
+          }
+        } catch (persistErr) {
+          console.warn('Webhook persistence error (pre-AI):', persistErr?.message || persistErr);
         }
-        const response = await openai.responses.create(requestPayload);
-        
-        aiResponse = response.output_text;
-        console.log('✨ OpenAI Responses API response:', aiResponse);
-        
+      })();
+    }
+
+    try {
+      // Use the new Responses API (no preview web search tool)
+      const requestPayload = {
+        model: OPENAI_MODEL,
+        input: question,
+        tools: [
+          { type: 'web_search' }
+        ],
+        tool_choice: 'auto'
+      };
+      if (conversationId) {
+        requestPayload.conversation = conversationId;
+      }
+      const response = await openai.responses.create(requestPayload);
+
+      aiResponse = response.output_text;
+      console.log('✨ OpenAI Responses API response:', aiResponse);
+
     } catch (error) {
-         console.error('❌ OpenAI Responses API error:', error);
-         
-         // Fallback to regular chat completion if Responses API fails
-         try {
-             const openaiResponse = await openai.chat.completions.create({
-                 model: 'gpt-4o',
-                 messages: [
-                     { 
-                         role: 'system', 
-                         content: 'You are a helpful AI assistant. When users ask about current events, weather, news, or time-sensitive information, be honest about your knowledge cutoff and suggest they check reliable sources for the most up-to-date information. For general knowledge questions, provide helpful and accurate responses.' 
-                     },
-                     { role: 'user', content: question }
-                 ],
-                 max_tokens: 800,
-                 temperature: 0.7,
-             });
-             aiResponse = openaiResponse.choices[0].message.content;
-             console.log('✨ Fallback OpenAI response:', aiResponse);
-         } catch (fallbackError) {
-             console.error('❌ Fallback also failed:', fallbackError);
-             aiResponse = "I'm sorry, I'm experiencing technical difficulties. Please try again later.";
-         }
-     }
-    
+      console.error('❌ OpenAI Responses API error:', error);
+
+      // Fallback to regular chat completion if Responses API fails
+      try {
+        const openaiResponse = await openai.chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            { 
+              role: 'system', 
+              content: 'You are a helpful AI assistant. When users ask about current events, weather, news, or time-sensitive information, be honest about your knowledge cutoff and suggest they check reliable sources for the most up-to-date information. For general knowledge questions, provide helpful and accurate responses.' 
+            },
+            { role: 'user', content: question }
+          ],
+          max_tokens: 800,
+          temperature: 0.7,
+        });
+        aiResponse = openaiResponse.choices[0].message.content;
+        console.log('✨ Fallback OpenAI response:', aiResponse);
+      } catch (fallbackError) {
+        console.error('❌ Fallback also failed:', fallbackError);
+        aiResponse = "I'm sorry, I'm experiencing technical difficulties. Please try again later.";
+      }
+    }
+
+    // Persist conversation+messages (non-blocking)
+    if (ENABLE_USER_SYSTEM && prisma) {
+      (async () => {
+        try {
+          const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
+          let conversationRow = null;
+          if (sessionRow && conversationId) {
+            try {
+              conversationRow = await prisma.conversation.upsert({
+                where: { omiSessionId_openaiConversationId: { omiSessionId: sessionRow.id, openaiConversationId: String(conversationId) } },
+                update: {},
+                create: { omiSessionId: sessionRow.id, openaiConversationId: String(conversationId) }
+              });
+            } catch (convErr) {
+              console.warn('Conversation upsert error:', convErr?.message || convErr);
+            }
+          }
+          if (conversationRow) {
+            // Persist user question message
+            try {
+              await prisma.message.create({
+                data: {
+                  conversationId: conversationRow.id,
+                  role: 'USER',
+                  text: question,
+                  source: 'OMI_TRANSCRIPT'
+                }
+              });
+            } catch (mErr) {
+              console.warn('User message persist error:', mErr?.message || mErr);
+            }
+            // Persist assistant response
+            try {
+              await prisma.message.create({
+                data: {
+                  conversationId: conversationRow.id,
+                  role: 'ASSISTANT',
+                  text: aiResponse,
+                  source: 'SYSTEM'
+                }
+              });
+            } catch (m2Err) {
+              console.warn('Assistant message persist error:', m2Err?.message || m2Err);
+            }
+          }
+        } catch (postPersistErr) {
+          console.warn('Webhook persistence error (post-AI):', postPersistErr?.message || postPersistErr);
+        }
+      })();
+    }
+
     // Return response so Omi shows content in chat and sends a single notification
     sessionTranscripts.delete(session_id);
     console.log('🧹 Cleared session transcript for:', session_id);
