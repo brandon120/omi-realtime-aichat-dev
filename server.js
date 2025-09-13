@@ -4,7 +4,7 @@ const OpenAI = require('openai');
 require('dotenv').config();
 const cookieParser = require('cookie-parser');
 const argon2 = require('argon2');
-const { nanoid } = require('nanoid');
+ 
 const ENABLE_USER_SYSTEM = String(process.env.ENABLE_USER_SYSTEM || 'false').toLowerCase() === 'true';
 let prisma = null;
 if (ENABLE_USER_SYSTEM) {
@@ -311,6 +311,7 @@ function getCookieOptions() {
 }
 
 async function createSession(prismaClient, userId) {
+  const { nanoid } = await import('nanoid');
   const token = nanoid(64);
   const expiresAt = new Date(Date.now() + (30 * 24 * 60 * 60 * 1000));
   await prismaClient.authSession.create({
