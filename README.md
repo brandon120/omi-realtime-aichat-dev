@@ -1,11 +1,11 @@
 # Omi Real-Time AI Chat Plugin
 
-A Node.js backend plugin for Omi that provides real-time AI chat capabilities using OpenAI's GPT-4 model. When users say "hey omi" followed by a question, the plugin automatically processes the question through GPT-4 and sends the response back to the user via Omi's notification system.
+A Node.js backend plugin for Omi that provides real-time AI chat capabilities using OpenAI's Responses API (gpt-4o / gpt-4o-mini) with Conversations for stateful chats. When users say "hey omi" followed by a question, the plugin processes the question and sends the response back to the user via Omi's notification system.
 
 ## 🚀 Features
 
 - **Voice Activation**: Listens for transcripts starting with "hey omi"
-- **GPT-4 Integration**: Uses OpenAI's latest GPT-4 model for intelligent responses
+- **Responses + Conversations**: Uses OpenAI's Responses API with Conversations for per-session context
 - **Real-time Notifications**: Sends responses back to users through Omi's notification API
 - **Error Handling**: Comprehensive error handling and logging
 - **Health Monitoring**: Built-in health check endpoint
@@ -36,10 +36,12 @@ Copy the environment template and configure your API keys:
 cp env.example .env
 ```
 
-Edit `.env` with your actual API keys:
+Edit `.env` with your actual API keys (prefer `OPENAI_API_KEY`; `OPENAI_KEY` is also supported):
 
 ```env
-OPENAI_KEY=sk-your-openai-api-key-here
+OPENAI_API_KEY=sk-your-openai-api-key-here
+# (optional fallback)
+# OPENAI_KEY=sk-your-openai-api-key-here
 OMI_APP_ID=your_omi_app_id_here
 OMI_APP_SECRET=your_omi_app_secret_here
 PORT=3000
@@ -103,7 +105,7 @@ railway init
 ### 4. Set Environment Variables
 
 ```bash
-railway variables set OPENAI_KEY=sk-your-openai-api-key-here
+railway variables set OPENAI_API_KEY=sk-your-openai-api-key-here
 railway variables set OMI_APP_ID=your_omi_app_id_here
 railway variables set OMI_APP_SECRET=your_omi_app_secret_here
 ```

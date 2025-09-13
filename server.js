@@ -70,17 +70,16 @@ const notificationHistory = new Map(); // Track notifications per user
 const MAX_NOTIFICATIONS_PER_HOUR = 10;
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour in milliseconds
 
-// Initialize OpenAI client
+// Initialize OpenAI client (prefer OPENAI_API_KEY per latest SDK docs)
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_KEY,
+  apiKey: process.env.OPENAI_API_KEY || process.env.OPENAI_KEY,
 });
 
 // OpenAI Responses API configuration
 const OPENAI_MODEL = "gpt-4o-mini"; // Smaller/cheaper, supports conversation state
-const WEB_SEARCH_TOOL = { type: "web_search_preview" };
 
 // No need to create an assistant - Responses API handles everything
-console.log('✅ Using OpenAI Responses API with web search');
+console.log('✅ Using OpenAI Responses API with Conversations');
 
 /**
  * Sends a direct notification to an Omi user with rate limiting.
@@ -183,7 +182,7 @@ function getRateLimitStatus(userId) {
     };
 }
 
-// Web search is now handled automatically by OpenAI's web_search_preview tool
+// Conversation state is managed via OpenAI Conversations API per session
 
 // Middleware
 app.use(express.json());
@@ -215,7 +214,6 @@ app.get('/health', (req, res) => {
     api: {
       type: 'OpenAI Responses API',
       model: OPENAI_MODEL,
-      web_search: 'web_search_preview tool enabled',
       conversation_state: 'enabled (server-managed conversation id per Omi session)'
     }
   });
@@ -422,8 +420,8 @@ app.post('/omi-webhook', async (req, res) => {
 
         console.log('🤖 Processing question:', question);
     
-    // Use OpenAI Responses API with built-in web search
-    console.log('🤖 Using OpenAI Responses API with web search for:', question);
+    // Use OpenAI Responses API with Conversations
+    console.log('🤖 Using OpenAI Responses API (Conversations) for:', question);
     
     let aiResponse = '';
     
@@ -443,10 +441,9 @@ app.post('/omi-webhook', async (req, res) => {
     }
     
     try {
-        // Use the new Responses API with web search
+        // Use the new Responses API (no preview web search tool)
         const requestPayload = {
           model: OPENAI_MODEL,
-          tools: [WEB_SEARCH_TOOL],
           input: question,
         };
         if (conversationId) {
@@ -456,11 +453,6 @@ app.post('/omi-webhook', async (req, res) => {
         
         aiResponse = response.output_text;
         console.log('✨ OpenAI Responses API response:', aiResponse);
-        
-        // Log additional response data for debugging
-        if (response.tool_use && response.tool_use.length > 0) {
-            console.log('🔍 Web search tool was used:', response.tool_use);
-        }
         
     } catch (error) {
          console.error('❌ OpenAI Responses API error:', error);
@@ -548,8 +540,8 @@ app.listen(PORT, async () => {
   console.log(`📡 Webhook endpoint: http://localhost:${PORT}/omi-webhook`);
   
   // Check environment variables (Updated)
-  if (!process.env.OPENAI_KEY) {
-    console.warn('⚠️  OPENAI_KEY environment variable is not set');
+  if (!process.env.OPENAI_API_KEY && !process.env.OPENAI_KEY) {
+    console.warn('⚠️  OPENAI_API_KEY (or OPENAI_KEY) environment variable is not set');
   }
   if (!process.env.OMI_APP_ID) {
     console.warn('⚠️  OMI_APP_ID environment variable is not set');
@@ -559,7 +551,7 @@ app.listen(PORT, async () => {
   }
   
      // OpenAI Responses API is ready to use
-   console.log('✅ OpenAI Responses API ready with web search capability');
+   console.log('✅ OpenAI Responses API ready with Conversations');
   
      // Set up session cleanup every 5 minutes
    setInterval(() => {
