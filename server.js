@@ -157,6 +157,97 @@ async function sendOmiNotification(userId, message) {
     });
 }
 
+// ---- OMI API generic helper ----
+function omiApiRequest(method, path, { query = {}, body = null } = {}) {
+  const appId = process.env.OMI_APP_ID;
+  const appSecret = process.env.OMI_APP_SECRET;
+  if (!appId) throw new Error("OMI_APP_ID not set");
+  if (!appSecret) throw new Error("OMI_APP_SECRET not set");
+
+  const qs = Object.entries(query)
+    .filter(([, v]) => v !== undefined && v !== null)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&');
+
+  const options = {
+    hostname: 'api.omi.me',
+    path: `/v2/integrations/${appId}${path}${qs ? `?${qs}` : ''}`,
+    method,
+    headers: {
+      'Authorization': `Bearer ${appSecret}`,
+      'Content-Type': 'application/json',
+    }
+  };
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => (data += chunk));
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          resolve(data ? JSON.parse(data) : {});
+        } else {
+          reject(new Error(`OMI API ${res.statusCode}: ${data || 'No body'}`));
+        }
+      });
+    });
+    req.on('error', reject);
+    if (body) req.write(JSON.stringify(body));
+    req.end();
+  });
+}
+
+// ---- OMI Import wrappers ----
+
+// 1) Create Conversation
+async function omiCreateConversation({ uid, text, started_at, finished_at, language, geolocation, text_source, text_source_spec }) {
+  if (!uid) throw new Error('uid is required');
+  if (!text) throw new Error('text is required');
+
+  const body = {
+    text,
+    ...(started_at && { started_at }),
+    ...(finished_at && { finished_at }),
+    ...(language && { language }),
+    ...(geolocation && { geolocation }), // { latitude, longitude }
+    ...(text_source && { text_source }), // "audio_transcript" | "message" | "other_text"
+    ...(text_source_spec && { text_source_spec })
+  };
+
+  return omiApiRequest('POST', `/user/conversations`, { query: { uid }, body });
+}
+
+// 2) Create Memories
+async function omiCreateMemories({ uid, text, text_source, text_source_spec, memories }) {
+  if (!uid) throw new Error('uid is required');
+  if (!text && (!memories || !memories.length)) {
+    throw new Error('Either text or memories[] is required');
+  }
+
+  const body = {
+    ...(text && { text }),
+    ...(text_source && { text_source }),        // "email" | "social_post" | "other"
+    ...(text_source_spec && { text_source_spec }),
+    ...(memories && memories.length ? { memories } : {})
+  };
+
+  return omiApiRequest('POST', `/user/memories`, { query: { uid }, body });
+}
+
+// 3) Read Conversations
+async function omiReadConversations({ uid, limit = 100, offset = 0, include_discarded = false, statuses }) {
+  if (!uid) throw new Error('uid is required');
+  return omiApiRequest('GET', `/conversations`, {
+    query: { uid, limit, offset, include_discarded, ...(statuses ? { statuses } : {}) }
+  });
+}
+
+// 4) Read Memories
+async function omiReadMemories({ uid, limit = 100, offset = 0 }) {
+  if (!uid) throw new Error('uid is required');
+  return omiApiRequest('GET', `/memories`, { query: { uid, limit, offset } });
+}
+
 /**
  * Gets the current rate limit status for a user
  * @param {string} userId - The Omi user's unique ID
@@ -271,6 +362,48 @@ app.get('/rate-limit/:userId', (req, res) => {
       `Rate limited. Try again in ${status.timeUntilReset} minutes.` :
       `${status.remaining} notifications remaining this hour.`
   });
+});
+
+// ---- OMI Import REST endpoints ----
+
+// Create Conversation
+app.post('/omi/import/conversation', async (req, res) => {
+  try {
+    const result = await omiCreateConversation(req.body);
+    res.status(200).json({ ok: true, result });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+// Create Memories
+app.post('/omi/import/memories', async (req, res) => {
+  try {
+    const result = await omiCreateMemories(req.body);
+    res.status(200).json({ ok: true, result });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+// Read Conversations
+app.get('/omi/import/conversations', async (req, res) => {
+  try {
+    const result = await omiReadConversations(req.query);
+    res.status(200).json({ ok: true, ...result });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+// Read Memories
+app.get('/omi/import/memories', async (req, res) => {
+  try {
+    const result = await omiReadMemories(req.query);
+    res.status(200).json({ ok: true, ...result });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
 });
 
 // Main Omi webhook endpoint
@@ -421,6 +554,35 @@ app.post('/omi-webhook', async (req, res) => {
 
         console.log('🤖 Processing question:', question);
     
+    // ---- OMI Import intent hooks ----
+    const uid = req.body?.user_id || req.query?.uid; // allow either source of uid
+
+    // Memory intent (e.g., "remember/save/note ... as a memory/fact")
+    if (/\b(remember|save|note)\b.*\b(memory|fact)\b/i.test(question)) {
+      try {
+        await omiCreateMemories({ uid, text: question, text_source: 'other' });
+        sessionTranscripts.delete(session_id);
+        return res.status(200).json({ message: "Saved to your OMI memories." });
+      } catch (e) {
+        console.error('Memory import failed:', e);
+        sessionTranscripts.delete(session_id);
+        return res.status(200).json({ message: "I tried to save that as a memory but hit an error." });
+      }
+    }
+
+    // Conversation intent (e.g., "log/record/create conversation/meeting/call ...")
+    if (/\b(log|record|create)\b.*\b(conversation|meeting|call)\b/i.test(question)) {
+      try {
+        await omiCreateConversation({ uid, text: question, text_source: 'other_text' });
+        sessionTranscripts.delete(session_id);
+        return res.status(200).json({ message: "Logged as a conversation in OMI." });
+      } catch (e) {
+        console.error('Conversation import failed:', e);
+        sessionTranscripts.delete(session_id);
+        return res.status(200).json({ message: "I tried to log that conversation but hit an error." });
+      }
+    }
+
     // Use OpenAI Responses API with Conversations
     console.log('🤖 Using OpenAI Responses API (Conversations) for:', question);
     
