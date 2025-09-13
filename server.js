@@ -438,7 +438,7 @@ app.post('/omi-webhook', async (req, res) => {
         const response = await openai.responses.create({
             model: OPENAI_MODEL,
             tools: [WEB_SEARCH_TOOL],
-            input: { role: 'user', content: question },
+            input: question,
             conversation: conversationId,
         });
         
