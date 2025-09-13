@@ -410,30 +410,47 @@ app.post('/omi-webhook', async (req, res) => {
       });
     }
     
-         console.log('🤖 Processing question:', question);
-     
-     // Use OpenAI Responses API with built-in web search
-     console.log('🤖 Using OpenAI Responses API with web search for:', question);
-     
-     let aiResponse = '';
-     
-     try {
-         // Use the new Responses API with web search
-         const response = await openai.responses.create({
-             model: OPENAI_MODEL,
-             tools: [WEB_SEARCH_TOOL],
-             input: question,
-         });
-         
-         aiResponse = response.output_text;
-         console.log('✨ OpenAI Responses API response:', aiResponse);
-         
-         // Log additional response data for debugging
-         if (response.tool_use && response.tool_use.length > 0) {
-             console.log('🔍 Web search tool was used:', response.tool_use);
-         }
-         
-     } catch (error) {
+    // Deduplicate to avoid triggering the AI again for the same content
+    const normalizedQuestion = normalizeText(question);
+    const last = lastProcessedQuestion.get(session_id);
+    const COOLDOWN_MS = 10 * 1000; // 10 seconds
+    if (last && (Date.now() - last.ts) < COOLDOWN_MS && isNearDuplicate(last.normalized, normalizedQuestion)) {
+      console.log('⏭️ Suppressing near-duplicate within cooldown window:', question);
+      return res.status(200).json({});
+    }
+    lastProcessedQuestion.set(session_id, { normalized: normalizedQuestion, ts: Date.now() });
+
+        console.log('🤖 Processing question:', question);
+    
+    // Use OpenAI Responses API with built-in web search
+    console.log('🤖 Using OpenAI Responses API with web search for:', question);
+    
+    let aiResponse = '';
+    
+    // Ensure stable conversation id for this Omi session
+    if (!sessionConversations.has(session_id)) {
+      sessionConversations.set(session_id, `omi-${session_id}`);
+    }
+    const conversationId = sessionConversations.get(session_id);
+    
+    try {
+        // Use the new Responses API with web search
+        const response = await openai.responses.create({
+            model: OPENAI_MODEL,
+            tools: [WEB_SEARCH_TOOL],
+            input: { role: 'user', content: question },
+            conversation: conversationId,
+        });
+        
+        aiResponse = response.output_text;
+        console.log('✨ OpenAI Responses API response:', aiResponse);
+        
+        // Log additional response data for debugging
+        if (response.tool_use && response.tool_use.length > 0) {
+            console.log('🔍 Web search tool was used:', response.tool_use);
+        }
+        
+    } catch (error) {
          console.error('❌ OpenAI Responses API error:', error);
          
          // Fallback to regular chat completion if Responses API fails
