@@ -1,6 +1,7 @@
 const express = require('express');
 const https = require('https');
 const OpenAI = require('openai');
+const axios = require('axios');
 require('dotenv').config();
 
 /**
@@ -80,6 +81,102 @@ const OPENAI_MODEL = "gpt-4o-mini"; // Smaller/cheaper, supports conversation st
 
 // No need to create an assistant - Responses API handles everything
 console.log('✅ Using OpenAI Responses API with Conversations');
+
+// Web Search configuration (Tavily)
+const WEB_SEARCH_PROVIDER = 'tavily';
+const WEB_SEARCH_ENABLED = !!process.env.TAVILY_API_KEY;
+
+/**
+ * Detect whether a query likely requires web search (time-sensitive or explicit search intent)
+ * @param {string} text
+ * @returns {boolean}
+ */
+function isWebQuery(text) {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  const intentPatterns = [
+    /\b(search|look up|find online|check (the )?web|google)\b/,
+    /\b(latest|current|today|now|breaking|recent|update|updated)\b/,
+    /\b(news|headlines|trend(s)?|rumor(s)?)\b/,
+    /\bweather|forecast|temperature\b/,
+    /\bprice|stock|ticker|exchange rate|btc|eth|crypto\b/,
+    /\bschedule|score|who won|final score\b/,
+    /\brelease date|launch date|downtime|outage status|is .* down\b/,
+  ];
+  return intentPatterns.some((re) => re.test(lower));
+}
+
+/**
+ * Perform a web search via Tavily API
+ * @param {string} query
+ * @returns {Promise<{ answer?: string, results: Array<{title:string,url:string,content?:string,score?:number}>}>}
+ */
+async function tavilySearch(query) {
+  if (!WEB_SEARCH_ENABLED) {
+    throw new Error('Web search is not enabled (missing TAVILY_API_KEY)');
+  }
+  const payload = {
+    api_key: process.env.TAVILY_API_KEY,
+    query,
+    search_depth: 'advanced',
+    max_results: 5,
+    include_answer: true,
+  };
+  const { data } = await axios.post('https://api.tavily.com/search', payload, {
+    timeout: 15000,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  // Normalize structure
+  return {
+    answer: data.answer,
+    results: Array.isArray(data.results) ? data.results.map(r => ({
+      title: r.title,
+      url: r.url,
+      content: r.content,
+      score: r.score,
+    })) : [],
+  };
+}
+
+function formatSources(results, limit = 3) {
+  const top = (results || []).slice(0, limit);
+  if (top.length === 0) return '';
+  const lines = top.map((r, idx) => `${idx + 1}. ${r.title} - ${r.url}`);
+  return `\n\nSources:\n${lines.join('\n')}`;
+}
+
+/**
+ * Synthesize an answer using OpenAI given web results, with inline bracket citations [n]
+ * @param {string} question
+ * @param {{answer?: string, results: Array<{title:string,url:string,content?:string}>}} web
+ * @returns {Promise<string>}
+ */
+async function synthesizeWithWebResults(question, web) {
+  const numbered = (web.results || []).map((r, i) => {
+    const snippet = (r.content || '').slice(0, 600);
+    return `${i + 1}. ${r.title} - ${r.url}\n${snippet}`;
+  }).join('\n\n');
+
+  const prompt = [
+    'You are a helpful assistant with access to recent web results.',
+    'Use the provided results to answer the question accurately and concisely.',
+    'Cite sources inline using bracket indices like [1], [2].',
+    'If uncertain, say so briefly.',
+    '',
+    `Question: ${question}`,
+    '',
+    'Web results:',
+    numbered || '(no results)'
+  ].join('\n');
+
+  const requestPayload = {
+    model: OPENAI_MODEL,
+    input: prompt,
+  };
+  const response = await openai.responses.create(requestPayload);
+  const base = response.output_text || '';
+  return base + formatSources(web.results);
+}
 
 /**
  * Sends a direct notification to an Omi user with rate limiting.
@@ -215,6 +312,11 @@ app.get('/health', (req, res) => {
       type: 'OpenAI Responses API',
       model: OPENAI_MODEL,
       conversation_state: 'enabled (server-managed conversation id per Omi session)'
+    },
+    web_search: {
+      enabled: WEB_SEARCH_ENABLED,
+      provider: WEB_SEARCH_PROVIDER,
+      env: WEB_SEARCH_ENABLED ? 'TAVILY_API_KEY present' : 'missing TAVILY_API_KEY'
     }
   });
 });
@@ -441,18 +543,31 @@ app.post('/omi-webhook', async (req, res) => {
     }
     
     try {
-        // Use the new Responses API (no preview web search tool)
-        const requestPayload = {
-          model: OPENAI_MODEL,
-          input: question,
-        };
-        if (conversationId) {
-          requestPayload.conversation = conversationId;
+        // Decide whether to perform web search first
+        if (WEB_SEARCH_ENABLED && isWebQuery(question)) {
+          console.log('🌐 Performing web search for query');
+          try {
+            const web = await tavilySearch(question);
+            aiResponse = await synthesizeWithWebResults(question, web);
+            console.log('✨ Synthesized with web results');
+          } catch (webErr) {
+            console.warn('⚠️ Web search failed, falling back to model only:', webErr?.message || webErr);
+          }
         }
-        const response = await openai.responses.create(requestPayload);
-        
-        aiResponse = response.output_text;
-        console.log('✨ OpenAI Responses API response:', aiResponse);
+
+        if (!aiResponse) {
+          // Use the new Responses API (no preview web search tool)
+          const requestPayload = {
+            model: OPENAI_MODEL,
+            input: question,
+          };
+          if (conversationId) {
+            requestPayload.conversation = conversationId;
+          }
+          const response = await openai.responses.create(requestPayload);
+          aiResponse = response.output_text;
+          console.log('✨ OpenAI Responses API response:', aiResponse);
+        }
         
     } catch (error) {
          console.error('❌ OpenAI Responses API error:', error);
