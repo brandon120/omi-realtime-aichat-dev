@@ -1,5 +1,3 @@
-// Prisma schema for Omi user system (PostgreSQL)
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -7,6 +5,171 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+model User {
+  id                 String              @id @default(uuid()) @db.Uuid
+  email              String              @unique
+  passwordHash       String
+  displayName        String?
+  role               Role                @default(USER)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  agentEvents        AgentEvent[]
+  sessions           AuthSession[]
+  conversations      Conversation[]
+  memories           Memory[]
+  notificationEvents NotificationEvent[]
+  omiSessions        OmiSession[]
+  links              OmiUserLink[]
+  contextWindows     UserContextWindow[]
+}
+
+model AuthSession {
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String   @db.Uuid
+  sessionToken String   @unique
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model OmiUserLink {
+  id                     String    @id @default(uuid()) @db.Uuid
+  userId                 String    @db.Uuid
+  omiUserId              String    @unique
+  isVerified             Boolean   @default(false)
+  verificationCode       String?
+  verificationExpiresAt  DateTime?
+  verificationAttempts   Int       @default(0)
+  verifiedAt             DateTime?
+  createdAt              DateTime  @default(now())
+  user                   User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model OmiSession {
+  id                   String              @id @default(uuid()) @db.Uuid
+  omiSessionId         String              @unique
+  userId               String?             @db.Uuid
+  openaiConversationId String?
+  createdAt            DateTime            @default(now())
+  lastSeenAt           DateTime            @default(now())
+  conversations        Conversation[]
+  user                 User?               @relation(fields: [userId], references: [id])
+  transcriptSegments   TranscriptSegment[]
+
+  @@index([userId])
+}
+
+model Conversation {
+  id                   String              @id @default(uuid()) @db.Uuid
+  userId               String?             @db.Uuid
+  omiSessionId         String?             @db.Uuid
+  openaiConversationId String
+  title                String?
+  summary              String?
+  createdAt            DateTime            @default(now())
+  endedAt              DateTime?
+  agentEvents          AgentEvent[]
+  omiSession           OmiSession?         @relation(fields: [omiSessionId], references: [id])
+  user                 User?               @relation(fields: [userId], references: [id])
+  messages             Message[]
+  contextWindows       UserContextWindow[]
+
+  @@index([userId])
+  @@index([omiSessionId])
+  @@index([openaiConversationId])
+  @@unique([omiSessionId, openaiConversationId])
+}
+
+model Message {
+  id             String        @id @default(uuid()) @db.Uuid
+  conversationId String        @db.Uuid
+  role           MessageRole
+  text           String
+  rawPayload     Json?
+  source         MessageSource
+  createdAt      DateTime      @default(now())
+  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@index([role])
+  @@index([source])
+}
+
+model TranscriptSegment {
+  id           String     @id @default(uuid()) @db.Uuid
+  omiSessionId String     @db.Uuid
+  omiSegmentId String
+  text         String
+  speaker      String?
+  speakerId    Int?
+  isUser       Boolean?
+  start        Float?
+  end          Float?
+  createdAt    DateTime   @default(now())
+  omiSession   OmiSession @relation(fields: [omiSessionId], references: [id], onDelete: Cascade)
+
+  @@unique([omiSessionId, omiSegmentId])
+  @@index([omiSessionId])
+}
+
+model UserContextWindow {
+  id             String       @id @default(uuid()) @db.Uuid
+  userId         String       @db.Uuid
+  slot           Int
+  conversationId String       @db.Uuid
+  isActive       Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, slot])
+  @@index([userId, isActive])
+}
+
+model AgentEvent {
+  id             String        @id @default(uuid()) @db.Uuid
+  userId         String?       @db.Uuid
+  conversationId String?       @db.Uuid
+  type           String
+  payload        Json?
+  createdAt      DateTime      @default(now())
+  conversation   Conversation? @relation(fields: [conversationId], references: [id])
+  user           User?         @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([conversationId])
+}
+
+model NotificationEvent {
+  id        String              @id @default(uuid()) @db.Uuid
+  userId    String?             @db.Uuid
+  channel   NotificationChannel
+  message   String
+  status    String
+  error     String?
+  createdAt DateTime            @default(now())
+  user      User?               @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([channel])
+  @@index([createdAt])
+}
+
+model Memory {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  text      String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 enum Role {
@@ -33,169 +196,3 @@ enum NotificationChannel {
   EMAIL
   PUSH
 }
-
-model User {
-  id                String               @id @default(uuid()) @db.Uuid
-  email             String               @unique
-  passwordHash      String
-  displayName       String?
-  role              Role                 @default(USER)
-  createdAt         DateTime             @default(now())
-  updatedAt         DateTime             @updatedAt
-
-  sessions          AuthSession[]
-  links             OmiUserLink[]
-  conversations     Conversation[]
-  omiSessions       OmiSession[]
-  contextWindows    UserContextWindow[]
-  agentEvents       AgentEvent[]
-  notificationEvents NotificationEvent[]
-  memories          Memory[]
-}
-
-model AuthSession {
-  id           String   @id @default(uuid()) @db.Uuid
-  userId       String   @db.Uuid
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  sessionToken String   @unique
-  expiresAt    DateTime
-  createdAt    DateTime @default(now())
-
-  @@index([userId])
-  @@index([expiresAt])
-}
-
-model OmiUserLink {
-  id                String   @id @default(uuid()) @db.Uuid
-  userId            String   @db.Uuid
-  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  omiUserId         String   @unique
-  isVerified        Boolean  @default(false)
-  verificationCode  String?
-  verifiedAt        DateTime?
-  createdAt         DateTime @default(now())
-
-  @@index([userId])
-}
-
-model OmiSession {
-  id                     String              @id @default(uuid()) @db.Uuid
-  omiSessionId           String              @unique
-  userId                 String?             @db.Uuid
-  user                   User?               @relation(fields: [userId], references: [id], onDelete: SetNull)
-  openaiConversationId   String?
-  createdAt              DateTime            @default(now())
-  lastSeenAt             DateTime            @default(now())
-
-  conversations          Conversation[]
-  transcriptSegments     TranscriptSegment[]
-
-  @@index([userId])
-}
-
-model Conversation {
-  id                    String                @id @default(uuid()) @db.Uuid
-  userId                String?               @db.Uuid
-  user                  User?                 @relation(fields: [userId], references: [id], onDelete: SetNull)
-  omiSessionId          String?               @db.Uuid
-  omiSession            OmiSession?           @relation(fields: [omiSessionId], references: [id], onDelete: SetNull)
-  openaiConversationId  String
-  title                 String?
-  summary               String?
-  createdAt             DateTime              @default(now())
-  endedAt               DateTime?
-
-  messages              Message[]
-  contextWindows        UserContextWindow[]
-  agentEvents           AgentEvent[]
-
-  @@index([userId])
-  @@index([omiSessionId])
-  @@index([openaiConversationId])
-}
-
-model Message {
-  id              String         @id @default(uuid()) @db.Uuid
-  conversationId  String         @db.Uuid
-  conversation    Conversation   @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  role            MessageRole
-  text            String
-  rawPayload      Json?
-  source          MessageSource
-  createdAt       DateTime       @default(now())
-
-  @@index([conversationId, createdAt])
-  @@index([role])
-  @@index([source])
-}
-
-model TranscriptSegment {
-  id            String      @id @default(uuid()) @db.Uuid
-  omiSessionId  String      @db.Uuid
-  omiSession    OmiSession  @relation(fields: [omiSessionId], references: [id], onDelete: Cascade)
-  omiSegmentId  String
-  text          String
-  speaker       String?
-  speakerId     Int?
-  isUser        Boolean?
-  start         Float?
-  end           Float?
-  createdAt     DateTime    @default(now())
-
-  @@unique([omiSessionId, omiSegmentId])
-  @@index([omiSessionId])
-}
-
-model UserContextWindow {
-  id              String        @id @default(uuid()) @db.Uuid
-  userId          String        @db.Uuid
-  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  slot            Int
-  conversationId  String        @db.Uuid
-  conversation    Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  isActive        Boolean       @default(false)
-  createdAt       DateTime      @default(now())
-
-  @@unique([userId, slot])
-  @@index([userId, isActive])
-}
-
-model AgentEvent {
-  id              String        @id @default(uuid()) @db.Uuid
-  userId          String?       @db.Uuid
-  user            User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
-  conversationId  String?       @db.Uuid
-  conversation    Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  type            String
-  payload         Json?
-  createdAt       DateTime      @default(now())
-
-  @@index([userId])
-  @@index([conversationId])
-}
-
-model NotificationEvent {
-  id         String               @id @default(uuid()) @db.Uuid
-  userId     String?              @db.Uuid
-  user       User?                @relation(fields: [userId], references: [id], onDelete: SetNull)
-  channel    NotificationChannel
-  message    String
-  status     String
-  error      String?
-  createdAt  DateTime             @default(now())
-
-  @@index([userId])
-  @@index([channel])
-  @@index([createdAt])
-}
-
-model Memory {
-  id        String   @id @default(uuid()) @db.Uuid
-  userId    String   @db.Uuid
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  text      String
-  createdAt DateTime @default(now())
-
-  @@index([userId])
-}
-
