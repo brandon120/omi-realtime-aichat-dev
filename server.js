@@ -2,6 +2,9 @@ const express = require('express');
 const https = require('https');
 const OpenAI = require('openai');
 require('dotenv').config();
+const cookieParser = require('cookie-parser');
+const argon2 = require('argon2');
+const { nanoid } = require('nanoid');
 const ENABLE_USER_SYSTEM = String(process.env.ENABLE_USER_SYSTEM || 'false').toLowerCase() === 'true';
 let prisma = null;
 if (ENABLE_USER_SYSTEM) {
@@ -289,6 +292,73 @@ function getRateLimitStatus(userId) {
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+if (ENABLE_USER_SYSTEM) {
+  app.use(cookieParser(process.env.SESSION_SECRET || ''));
+}
+
+// --------- Auth helpers (feature-flagged) ---------
+function getCookieOptions() {
+  const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+  // 30 days
+  const maxAgeMs = 30 * 24 * 60 * 60 * 1000;
+  return {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    maxAge: maxAgeMs,
+    signed: !!(process.env.SESSION_SECRET && process.env.SESSION_SECRET.length > 0)
+  };
+}
+
+async function createSession(prismaClient, userId) {
+  const token = nanoid(64);
+  const expiresAt = new Date(Date.now() + (30 * 24 * 60 * 60 * 1000));
+  await prismaClient.authSession.create({
+    data: {
+      userId,
+      sessionToken: token,
+      expiresAt
+    }
+  });
+  return { token, expiresAt };
+}
+
+async function getSession(prismaClient, token) {
+  if (!token) return null;
+  const session = await prismaClient.authSession.findUnique({ where: { sessionToken: token } });
+  if (!session) return null;
+  if (session.expiresAt && session.expiresAt < new Date()) {
+    // Expired: cleanup
+    try { await prismaClient.authSession.delete({ where: { sessionToken: token } }); } catch {}
+    return null;
+  }
+  return session;
+}
+
+function getSidFromRequest(req) {
+  const signedSid = req.signedCookies ? req.signedCookies.sid : undefined;
+  const plainSid = req.cookies ? req.cookies.sid : undefined;
+  return signedSid || plainSid;
+}
+
+function requireAuth(req, res, next) {
+  if (!ENABLE_USER_SYSTEM || !prisma) return res.status(503).json({ error: 'User system disabled' });
+  const sid = getSidFromRequest(req);
+  if (!sid) return res.status(401).json({ error: 'Not authenticated' });
+  getSession(prisma, sid)
+    .then(async (session) => {
+      if (!session) return res.status(401).json({ error: 'Session invalid' });
+      const user = await prisma.user.findUnique({ where: { id: session.userId } });
+      if (!user) return res.status(401).json({ error: 'User not found' });
+      req.user = { id: user.id, email: user.email, displayName: user.displayName, role: user.role };
+      req.session = { token: session.sessionToken, expiresAt: session.expiresAt };
+      next();
+    })
+    .catch((e) => {
+      console.error('Auth middleware error:', e);
+      res.status(500).json({ error: 'Auth middleware error' });
+    });
+}
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -373,6 +443,86 @@ app.get('/help', (req, res) => {
     }
   });
 });
+
+// --------- Auth routes (feature-flagged) ---------
+if (ENABLE_USER_SYSTEM) {
+  // Register
+  app.post('/auth/register', async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const { email, password, display_name } = req.body || {};
+      const normalizedEmail = (email || '').toString().trim().toLowerCase();
+      if (!normalizedEmail || !password || password.length < 8) {
+        return res.status(400).json({ error: 'Invalid email or password too short' });
+      }
+      const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+      if (existing) return res.status(400).json({ error: 'Email already in use' });
+      const passwordHash = await argon2.hash(password);
+      const user = await prisma.user.create({
+        data: { email: normalizedEmail, passwordHash, displayName: display_name || null }
+      });
+      const { token } = await createSession(prisma, user.id);
+      res.cookie('sid', token, getCookieOptions());
+      res.status(201).json({ ok: true, user: { id: user.id, email: user.email, displayName: user.displayName } });
+    } catch (e) {
+      console.error('Register error:', e);
+      res.status(500).json({ error: 'Registration failed' });
+    }
+  });
+
+  // Login
+  app.post('/auth/login', async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const { email, password } = req.body || {};
+      const normalizedEmail = (email || '').toString().trim().toLowerCase();
+      if (!normalizedEmail || !password) {
+        return res.status(400).json({ error: 'Email and password are required' });
+      }
+      const user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+      if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+      const valid = await argon2.verify(user.passwordHash, password);
+      if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
+      const { token } = await createSession(prisma, user.id);
+      res.cookie('sid', token, getCookieOptions());
+      res.status(200).json({ ok: true, user: { id: user.id, email: user.email, displayName: user.displayName } });
+    } catch (e) {
+      console.error('Login error:', e);
+      res.status(500).json({ error: 'Login failed' });
+    }
+  });
+
+  // Logout
+  app.post('/auth/logout', async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const sid = getSidFromRequest(req);
+      if (sid) {
+        try { await prisma.authSession.delete({ where: { sessionToken: sid } }); } catch {}
+      }
+      res.clearCookie('sid', getCookieOptions());
+      res.status(200).json({ ok: true });
+    } catch (e) {
+      console.error('Logout error:', e);
+      res.status(500).json({ error: 'Logout failed' });
+    }
+  });
+
+  // Current user
+  app.get('/me', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const links = await prisma.omiUserLink.findMany({
+        where: { userId: req.user.id },
+        select: { omiUserId: true, isVerified: true, verifiedAt: true }
+      });
+      res.status(200).json({ ok: true, user: req.user, omi_links: links });
+    } catch (e) {
+      console.error('Me endpoint error:', e);
+      res.status(500).json({ error: 'Failed to load profile' });
+    }
+  });
+}
 
 // Rate limit status endpoint
 app.get('/rate-limit/:userId', (req, res) => {
