@@ -77,9 +77,12 @@ const openai = new OpenAI({
 
 // OpenAI Responses API configuration
 const OPENAI_MODEL = "gpt-5-mini-2025-08-07"; // Smaller/cheaper, supports conversation state
+// Toggle built-in web search tool for Responses API (default: enabled). Set ENABLE_WEB_SEARCH=false to disable.
+const ENABLE_WEB_SEARCH = process.env.ENABLE_WEB_SEARCH !== 'false';
 
 // No need to create an assistant - Responses API handles everything
 console.log('✅ Using OpenAI Responses API with Conversations');
+console.log('🌐 Web search tool:', ENABLE_WEB_SEARCH ? 'enabled' : 'disabled');
 
 /**
  * Sends a direct notification to an Omi user with rate limiting.
@@ -214,7 +217,10 @@ app.get('/health', (req, res) => {
     api: {
       type: 'OpenAI Responses API',
       model: OPENAI_MODEL,
-      conversation_state: 'enabled (server-managed conversation id per Omi session)'
+      conversation_state: 'enabled (server-managed conversation id per Omi session)',
+      tools: {
+        web_search: ENABLE_WEB_SEARCH ? 'enabled' : 'disabled'
+      }
     }
   });
 });
@@ -448,6 +454,12 @@ app.post('/omi-webhook', async (req, res) => {
         };
         if (conversationId) {
           requestPayload.conversation = conversationId;
+        }
+        if (ENABLE_WEB_SEARCH) {
+          requestPayload.tools = [{ type: 'web_search' }];
+          requestPayload.tool_choice = 'auto';
+          requestPayload.instructions =
+            'You are Omi, a helpful AI assistant. When questions involve current events, weather, live data, stocks, or time-sensitive topics, use the web_search tool to fetch up-to-date information. Include 1-3 concise source attributions with clickable links at the end if you searched. If search is unnecessary, answer directly without searching.';
         }
         const response = await openai.responses.create(requestPayload);
         
