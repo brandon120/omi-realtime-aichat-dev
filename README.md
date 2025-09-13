@@ -6,6 +6,7 @@ A Node.js backend plugin for Omi that provides real-time AI chat capabilities us
 
 - **Voice Activation**: Listens for transcripts starting with "hey omi"
 - **Responses + Conversations**: Uses OpenAI's Responses API with Conversations for per-session context
+- **Web Search Tool**: Enables built-in `web_search` via Responses API tools for current info
 - **Real-time Notifications**: Sends responses back to users through Omi's notification API
 - **Error Handling**: Comprehensive error handling and logging
 - **Health Monitoring**: Built-in health check endpoint
@@ -36,10 +37,11 @@ Copy the environment template and configure your API keys:
 cp env.example .env
 ```
 
-Edit `.env` with your actual API keys:
+Edit `.env` with your actual API keys (prefer `OPENAI_API_KEY`; `OPENAI_KEY` is still supported):
 
 ```env
-OPENAI_KEY=sk-your-openai-api-key-here
+OPENAI_API_KEY=sk-your-openai-api-key-here
+OPENAI_KEY=
 OMI_APP_ID=your_omi_app_id_here
 OMI_APP_SECRET=your_omi_app_secret_here
 PORT=3000
@@ -103,7 +105,7 @@ railway init
 ### 4. Set Environment Variables
 
 ```bash
-railway variables set OPENAI_KEY=sk-your-openai-api-key-here
+railway variables set OPENAI_API_KEY=sk-your-openai-api-key-here
 railway variables set OMI_APP_ID=your_omi_app_id_here
 railway variables set OMI_APP_SECRET=your_omi_app_secret_here
 ```
@@ -206,11 +208,10 @@ The plugin provides comprehensive logging:
 
 ### OpenAI Configuration
 
-The plugin uses these GPT-4 settings:
-- **Model**: `gpt-4`
-- **Max Tokens**: 500
-- **Temperature**: 0.7
-- **System Prompt**: "You are a helpful AI assistant. Provide clear, concise, and helpful responses."
+The plugin uses OpenAI Responses API with Conversations:
+- **Model**: `gpt-5-mini-2025-08-07` (configurable via code)
+- **Tools**: `web_search` enabled with `tool_choice: 'auto'`
+- **Environment variable**: prefer `OPENAI_API_KEY`; `OPENAI_KEY` is also read
 
 ### Omi API Configuration
 
