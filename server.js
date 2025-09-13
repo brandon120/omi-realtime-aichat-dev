@@ -578,7 +578,8 @@ if (ENABLE_USER_SYSTEM) {
         console.warn('Failed to send OMI notification, returning code for dev:', notifyErr?.message || notifyErr);
       }
 
-      res.status(200).json({ ok: true, omi_user_id: omiUserId });
+      const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+      res.status(200).json({ ok: true, omi_user_id: omiUserId, ...(isProduction ? {} : { dev_code: code }) });
     } catch (e) {
       console.error('Link start error:', e);
       res.status(500).json({ error: 'Failed to start OMI linking' });
@@ -725,54 +726,49 @@ app.post('/omi-webhook', async (req, res) => {
         const verifyMatch = fullTranscript.match(/\bverify\s+(\d{6})\b/i);
         if (verifyMatch) {
           const spokenCode = verifyMatch[1];
-          const omiUserId = req.body?.user_id;
-          if (!omiUserId) {
-            console.warn('Voice verify: missing user_id in webhook payload');
-            // Do not treat as error; just fall through to normal processing
-          } else {
-            const link = await prisma.omiUserLink.findUnique({ where: { omiUserId } });
-            if (link && !link.isVerified && link.verificationCode && link.verificationExpiresAt) {
-              const expired = link.verificationExpiresAt < new Date();
-              if (!expired && link.verificationAttempts < MAX_OTP_ATTEMPTS && link.verificationCode === spokenCode) {
-                // Mark verified
-                await prisma.omiUserLink.update({
-                  where: { omiUserId },
-                  data: {
-                    isVerified: true,
-                    verifiedAt: new Date(),
-                    verificationCode: null,
-                    verificationExpiresAt: null,
-                    verificationAttempts: 0
-                  }
-                });
-                // Attach active Omi session to this user
-                try {
-                  await prisma.omiSession.upsert({
-                    where: { omiSessionId: String(session_id) },
-                    update: { userId: link.userId, lastSeenAt: new Date() },
-                    create: { omiSessionId: String(session_id), userId: link.userId }
-                  });
-                } catch (attachErr) {
-                  console.warn('Failed to upsert/attach OmiSession:', attachErr?.message || attachErr);
-                }
-                sessionTranscripts.delete(session_id);
-                return res.status(200).json({ message: 'Verification successful. Your account is now linked.' });
-              } else if (expired) {
-                await prisma.omiUserLink.update({
-                  where: { omiUserId },
-                  data: { verificationCode: null, verificationExpiresAt: null }
-                });
-                sessionTranscripts.delete(session_id);
-                return res.status(200).json({ message: 'Your verification code expired. Please request a new code.' });
-              } else {
-                await prisma.omiUserLink.update({
-                  where: { omiUserId },
-                  data: { verificationAttempts: { increment: 1 } }
-                });
-                sessionTranscripts.delete(session_id);
-                return res.status(200).json({ message: 'That code was not correct. Please try again.' });
-              }
+          // Find pending link by code (unique enough for short TTL); newest wins if multiple
+          const link = await prisma.omiUserLink.findFirst({
+            where: { isVerified: false, verificationCode: spokenCode, verificationExpiresAt: { gt: new Date() } },
+            orderBy: { createdAt: 'desc' }
+          });
+          if (link) {
+            if (link.verificationAttempts >= MAX_OTP_ATTEMPTS) {
+              sessionTranscripts.delete(session_id);
+              return res.status(200).json({ message: 'Too many attempts. Please request a new code.' });
             }
+            // Mark verified
+            await prisma.omiUserLink.update({
+              where: { omiUserId: link.omiUserId },
+              data: {
+                isVerified: true,
+                verifiedAt: new Date(),
+                verificationCode: null,
+                verificationExpiresAt: null,
+                verificationAttempts: 0
+              }
+            });
+            // Attach active Omi session to this user
+            try {
+              await prisma.omiSession.upsert({
+                where: { omiSessionId: String(session_id) },
+                update: { userId: link.userId, lastSeenAt: new Date() },
+                create: { omiSessionId: String(session_id), userId: link.userId }
+              });
+            } catch (attachErr) {
+              console.warn('Failed to upsert/attach OmiSession:', attachErr?.message || attachErr);
+            }
+            sessionTranscripts.delete(session_id);
+            return res.status(200).json({ message: 'Verification successful. Your account is now linked.' });
+          } else {
+            // Increment attempts for any active links to gently rate-limit guessing (best-effort)
+            try {
+              await prisma.omiUserLink.updateMany({
+                where: { isVerified: false, verificationCode: spokenCode, verificationExpiresAt: { gt: new Date() } },
+                data: { verificationAttempts: { increment: 1 } }
+              });
+            } catch {}
+            sessionTranscripts.delete(session_id);
+            return res.status(200).json({ message: 'That code was not recognized. Please try again.' });
           }
         }
       } catch (voiceErr) {
