@@ -6,6 +6,7 @@ A Node.js backend plugin for Omi that provides real-time AI chat capabilities us
 
 - **Voice Activation**: Listens for transcripts starting with "hey omi"
 - **Responses + Conversations**: Uses OpenAI's Responses API with Conversations for per-session context
+- **Web Search (Tavily)**: Optional internet search for current events and time-sensitive info
 - **Real-time Notifications**: Sends responses back to users through Omi's notification API
 - **Error Handling**: Comprehensive error handling and logging
 - **Health Monitoring**: Built-in health check endpoint
@@ -43,6 +44,12 @@ OPENAI_KEY=sk-your-openai-api-key-here
 OMI_APP_ID=your_omi_app_id_here
 OMI_APP_SECRET=your_omi_app_secret_here
 PORT=3000
+# Enable optional web search (Tavily)
+ENABLE_WEB_SEARCH=true
+WEB_SEARCH_PROVIDER=tavily
+TAVILY_API_KEY=your_tavily_api_key_here
+TAVILY_SEARCH_DEPTH=basic
+TAVILY_MAX_RESULTS=5
 ```
 
 ### 3. Run Locally
@@ -203,14 +210,31 @@ The plugin provides comprehensive logging:
 | `OMI_APP_ID` | Omi App ID | Yes | - |
 | `OMI_APP_SECRET` | Omi App Secret | Yes | - |
 | `PORT` | Server port | No | 3000 |
+| `ENABLE_WEB_SEARCH` | Toggle web search tool | No | `true` |
+| `WEB_SEARCH_PROVIDER` | Web search provider | No | `tavily` |
+| `TAVILY_API_KEY` | Tavily API key | Required if search enabled | - |
+| `TAVILY_SEARCH_DEPTH` | Tavily search depth (`basic`/`advanced`) | No | `basic` |
+| `TAVILY_MAX_RESULTS` | Max Tavily results included | No | `5` |
 
 ### OpenAI Configuration
 
-The plugin uses these GPT-4 settings:
-- **Model**: `gpt-4`
-- **Max Tokens**: 500
+The plugin uses these OpenAI settings:
+- **Model**: `gpt-4o-mini`
+- **Max Tokens**: 800
 - **Temperature**: 0.7
 - **System Prompt**: "You are a helpful AI assistant. Provide clear, concise, and helpful responses."
+
+### Web Search
+
+If enabled, the server will automatically perform a web search (via Tavily) when it detects time-sensitive queries (e.g., includes "today", "latest", "news", "weather", etc.) or explicit intents ("search", "look up"). The results are summarized into the model prompt with source URLs.
+
+#### Debug endpoint
+
+You can test search directly in the browser or curl:
+
+```
+GET /search?q=openai%20latest%20news
+```
 
 ### Omi API Configuration
 

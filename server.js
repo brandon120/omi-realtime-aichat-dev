@@ -1,6 +1,7 @@
 const express = require('express');
 const https = require('https');
 const OpenAI = require('openai');
+const axios = require('axios');
 require('dotenv').config();
 
 /**
@@ -80,6 +81,86 @@ const OPENAI_MODEL = "gpt-5-mini-2025-08-07"; // Smaller/cheaper, supports conve
 
 // No need to create an assistant - Responses API handles everything
 console.log('✅ Using OpenAI Responses API with Conversations');
+
+// Web search configuration (Tavily by default)
+const WEB_SEARCH_PROVIDER = process.env.WEB_SEARCH_PROVIDER || 'tavily';
+const ENABLE_WEB_SEARCH = (process.env.ENABLE_WEB_SEARCH || 'true').toLowerCase() !== 'false';
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
+const TAVILY_SEARCH_DEPTH = process.env.TAVILY_SEARCH_DEPTH || 'basic'; // 'basic' | 'advanced'
+const TAVILY_MAX_RESULTS = parseInt(process.env.TAVILY_MAX_RESULTS || '5', 10);
+
+function shouldUseWebSearch(question) {
+  if (!question) return false;
+  const q = question.toLowerCase();
+  const explicit = ['search', 'look up', 'find online', 'web search', 'google this', 'check the web'];
+  const timeSensitive = [
+    'today', 'now', 'current', 'latest', 'this week', 'this month', 'breaking', 'news',
+    'headline', 'price of', 'stock', 'weather', 'forecast', 'time in', 'score', 'final score',
+    'released', 'launch', 'update', 'version', 'deadline', 'regulation', 'law', 'cve', 'vulnerability',
+    'status of', 'near me'
+  ];
+  return explicit.some(k => q.includes(k)) || timeSensitive.some(k => q.includes(k));
+}
+
+async function webSearch(query) {
+  if (!ENABLE_WEB_SEARCH) return null;
+  if (WEB_SEARCH_PROVIDER === 'tavily') {
+    return await tavilySearch(query);
+  }
+  throw new Error(`Unsupported WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER}`);
+}
+
+async function tavilySearch(query) {
+  if (!TAVILY_API_KEY) {
+    throw new Error('TAVILY_API_KEY not set');
+  }
+  const url = 'https://api.tavily.com/search';
+  const payload = {
+    api_key: TAVILY_API_KEY,
+    query,
+    search_depth: TAVILY_SEARCH_DEPTH,
+    include_images: false,
+    include_answers: true,
+    max_results: TAVILY_MAX_RESULTS,
+    include_domains: [],
+    exclude_domains: []
+  };
+  const { data } = await axios.post(url, payload, { timeout: 15000 });
+  return data;
+}
+
+function formatSearchResultsForPrompt(searchData) {
+  if (!searchData || !Array.isArray(searchData.results)) return '';
+  const lines = [];
+  lines.push('Web search results:');
+  searchData.results.slice(0, TAVILY_MAX_RESULTS).forEach((r, idx) => {
+    const content = (r.content || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    lines.push(`[${idx + 1}] ${r.title || 'Untitled'} (${r.url}) - ${content}`);
+  });
+  if (searchData.answer) {
+    lines.push('');
+    lines.push(`Tavily suggested answer: ${searchData.answer}`);
+  }
+  return lines.join('\n');
+}
+
+function extractSourceDomains(searchData) {
+  if (!searchData || !Array.isArray(searchData.results)) return [];
+  const domains = new Set();
+  for (const r of searchData.results) {
+    try {
+      const u = new URL(r.url);
+      domains.add(u.hostname.replace(/^www\./, ''));
+    } catch {}
+  }
+  return Array.from(domains).slice(0, 5);
+}
+
+function buildPromptWithSearchContext(question, searchData) {
+  const sources = extractSourceDomains(searchData);
+  const sourcesNote = sources.length ? ` Cite sources by domain at the end like (source: ${sources.join(', ')}).` : '';
+  return `You are a helpful AI assistant. The server has fetched recent web results relevant to the user's question. Use them to provide an accurate, up-to-date answer.\n\nUser question:\n${question}\n\n${formatSearchResultsForPrompt(searchData)}\n\nWhen answering, be concise, rely on the provided sources, and avoid speculation.${sourcesNote}`;
+}
 
 /**
  * Sends a direct notification to an Omi user with rate limiting.
@@ -272,6 +353,23 @@ app.get('/rate-limit/:userId', (req, res) => {
   });
 });
 
+// Web search debug endpoint
+app.get('/search', async (req, res) => {
+  try {
+    const q = (req.query.q || '').toString();
+    if (!q) {
+      return res.status(400).json({ error: 'Missing query. Provide ?q=your+query' });
+    }
+    if (!ENABLE_WEB_SEARCH) {
+      return res.status(503).json({ error: 'Web search disabled' });
+    }
+    const data = await webSearch(q);
+    return res.status(200).json({ provider: WEB_SEARCH_PROVIDER, query: q, results: data });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
 // Main Omi webhook endpoint
 app.post('/omi-webhook', async (req, res) => {
   try {
@@ -441,10 +539,21 @@ app.post('/omi-webhook', async (req, res) => {
     }
     
     try {
-        // Use the new Responses API (no preview web search tool)
+        // Optionally perform web search for time-sensitive queries
+        let webSearchData = null;
+        if (ENABLE_WEB_SEARCH && shouldUseWebSearch(question)) {
+          try {
+            console.log('🔎 Performing web search for question...');
+            webSearchData = await webSearch(question);
+          } catch (searchErr) {
+            console.warn('⚠️ Web search failed or unavailable:', searchErr?.message || searchErr);
+          }
+        }
+
+        // Use the Responses API, injecting web results into the prompt if available
         const requestPayload = {
           model: OPENAI_MODEL,
-          input: question,
+          input: webSearchData ? buildPromptWithSearchContext(question, webSearchData) : question,
         };
         if (conversationId) {
           requestPayload.conversation = conversationId;
@@ -462,9 +571,9 @@ app.post('/omi-webhook', async (req, res) => {
              const openaiResponse = await openai.chat.completions.create({
                  model: 'gpt-4o',
                  messages: [
-                     { 
-                         role: 'system', 
-                         content: 'You are a helpful AI assistant. When users ask about current events, weather, news, or time-sensitive information, be honest about your knowledge cutoff and suggest they check reliable sources for the most up-to-date information. For general knowledge questions, provide helpful and accurate responses.' 
+                     {
+                         role: 'system',
+                         content: 'You are a helpful AI assistant. If web search context is provided, rely on it to answer accurately and cite source domains. If no context, answer best-effort and be clear about uncertainty for time-sensitive topics.'
                      },
                      { role: 'user', content: question }
                  ],
@@ -552,6 +661,16 @@ app.listen(PORT, async () => {
   
      // OpenAI Responses API is ready to use
    console.log('✅ OpenAI Responses API ready with Conversations');
+
+  // Web search configuration logs
+  if (ENABLE_WEB_SEARCH) {
+    console.log(`✅ Web search enabled (provider: ${WEB_SEARCH_PROVIDER})`);
+    if (WEB_SEARCH_PROVIDER === 'tavily' && !TAVILY_API_KEY) {
+      console.warn('⚠️  TAVILY_API_KEY is not set; web search calls will fail');
+    }
+  } else {
+    console.log('ℹ️ Web search disabled');
+  }
   
      // Set up session cleanup every 5 minutes
    setInterval(() => {
