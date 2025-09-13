@@ -214,7 +214,8 @@ app.get('/health', (req, res) => {
     api: {
       type: 'OpenAI Responses API',
       model: OPENAI_MODEL,
-      conversation_state: 'enabled (server-managed conversation id per Omi session)'
+      conversation_state: 'enabled (server-managed conversation id per Omi session)',
+      tools: ['web_search']
     }
   });
 });
@@ -445,6 +446,10 @@ app.post('/omi-webhook', async (req, res) => {
         const requestPayload = {
           model: OPENAI_MODEL,
           input: question,
+          tools: [
+            { type: 'web_search' }
+          ],
+          tool_choice: 'auto'
         };
         if (conversationId) {
           requestPayload.conversation = conversationId;
