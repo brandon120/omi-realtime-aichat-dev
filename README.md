@@ -45,6 +45,7 @@ OPENAI_KEY=
 OMI_APP_ID=your_omi_app_id_here
 OMI_APP_SECRET=your_omi_app_secret_here
 PORT=3000
+FOLLOW_UP_WINDOW_MS=60000
 ```
 
 ### 3. Run Locally
@@ -212,6 +213,12 @@ The plugin uses OpenAI Responses API with Conversations:
 - **Model**: `gpt-5-mini-2025-08-07` (configurable via code)
 - **Tools**: `web_search` enabled with `tool_choice: 'auto'`
 - **Environment variable**: prefer `OPENAI_API_KEY`; `OPENAI_KEY` is also read
+
+### Follow-up Detection
+
+- **Purpose**: After the AI replies, the server opens a short window to capture natural follow-ups without requiring trigger phrases.
+- **Config**: `FOLLOW_UP_WINDOW_MS` (default 60000) controls the window duration.
+- **Behavior**: During the window, short questions or phrases like "tell me more", "what about …?" are treated as follow-ups. Polite acknowledgements (e.g., "thanks", "ok") end the window.
 
 ### Omi API Configuration
 
