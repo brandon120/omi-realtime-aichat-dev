@@ -36,12 +36,10 @@ Copy the environment template and configure your API keys:
 cp env.example .env
 ```
 
-Edit `.env` with your actual API keys (prefer `OPENAI_API_KEY`; `OPENAI_KEY` is also supported):
+Edit `.env` with your actual API keys:
 
 ```env
-OPENAI_API_KEY=sk-your-openai-api-key-here
-# (optional fallback)
-# OPENAI_KEY=sk-your-openai-api-key-here
+OPENAI_KEY=sk-your-openai-api-key-here
 OMI_APP_ID=your_omi_app_id_here
 OMI_APP_SECRET=your_omi_app_secret_here
 PORT=3000
@@ -105,7 +103,7 @@ railway init
 ### 4. Set Environment Variables
 
 ```bash
-railway variables set OPENAI_API_KEY=sk-your-openai-api-key-here
+railway variables set OPENAI_KEY=sk-your-openai-api-key-here
 railway variables set OMI_APP_ID=your_omi_app_id_here
 railway variables set OMI_APP_SECRET=your_omi_app_secret_here
 ```
