@@ -1,6 +1,7 @@
 const express = require('express');
 const https = require('https');
 const OpenAI = require('openai');
+const crypto = require('crypto');
 require('dotenv').config();
 
 /**
@@ -36,6 +37,18 @@ const PORT = process.env.PORT || 3000;
 
 // Session storage to accumulate transcript segments
 const sessionTranscripts = new Map();
+
+// Conversation state per session to avoid duplicate prompts and keep context
+// Map<session_id, { lastTranscript: string, lastQuestionHash: string, conversationId: string, lastActivity: number }>
+const sessionState = new Map();
+
+function normalizeForHash(text) {
+  return (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function hashText(text) {
+  return crypto.createHash('sha1').update(normalizeForHash(text)).digest('hex');
+}
 
 // Rate limiting for Omi notifications (max 10 per hour)
 const notificationQueue = [];
@@ -261,6 +274,16 @@ app.post('/omi-webhook', async (req, res) => {
       });
     }
     
+    // Initialize conversation state for this session if needed
+    if (!sessionState.has(session_id)) {
+      sessionState.set(session_id, {
+        lastTranscript: '',
+        lastQuestionHash: '',
+        conversationId: `conv_${session_id}`,
+        lastActivity: Date.now(),
+      });
+    }
+    
     // Accumulate transcript segments for this session
     if (!sessionTranscripts.has(session_id)) {
       sessionTranscripts.set(session_id, []);
@@ -279,8 +302,19 @@ app.post('/omi-webhook', async (req, res) => {
     console.log('📝 Accumulated transcript for session:', fullTranscript);
     console.log('📊 Total segments in session:', sessionSegments.length);
     
-        // Smart AI interaction detection
-    const transcriptLower = fullTranscript.toLowerCase();
+    // Determine only the new portion since last processed transcript
+    const state = sessionState.get(session_id);
+    let newPortion = fullTranscript;
+    if (state && state.lastTranscript && fullTranscript.startsWith(state.lastTranscript)) {
+      newPortion = fullTranscript.substring(state.lastTranscript.length).trim();
+    }
+    if (!newPortion) {
+      console.log('⏭️ No new transcript content since last turn. Skipping.');
+      return res.status(200).json({});
+    }
+
+    // Smart AI interaction detection on the new content only
+    const transcriptLower = newPortion.toLowerCase();
     
     // Primary trigger: Multiple AI assistant variations
     const triggerPhrases = [
@@ -301,9 +335,9 @@ app.post('/omi-webhook', async (req, res) => {
     );
     
     // Secondary triggers: Natural language patterns
-    const isQuestion = /\b(who|what|where|when|why|how|can you|could you|would you|tell me|show me|find|search|look up)\b/i.test(fullTranscript);
-    const isCommand = /\b(weather|news|temperature|time|date|current|today|now|latest|help me|i need|find out)\b/i.test(fullTranscript);
-    const isConversational = fullTranscript.endsWith('?') || fullTranscript.includes('?');
+    const isQuestion = /\b(who|what|where|when|why|how|can you|could you|would you|tell me|show me|find|search|look up)\b/i.test(newPortion);
+    const isCommand = /\b(weather|news|temperature|time|date|current|today|now|latest|help me|i need|find out)\b/i.test(newPortion);
+    const isConversational = newPortion.endsWith('?') || newPortion.includes('?');
     
     // Help keywords
     const helpKeywords = [
@@ -335,45 +369,27 @@ app.post('/omi-webhook', async (req, res) => {
         });
       } else {
         // User didn't trigger AI interaction - silently ignore
-        console.log('⏭️ Skipping transcript - no AI interaction detected:', fullTranscript);
+        console.log('⏭️ Skipping transcript - no AI interaction detected:', newPortion);
         return res.status(200).json({}); // Return empty response - no message
       }
     }
     
-         // Extract the question from the accumulated transcript
-     let question = '';
-     
-     if (hasTriggerPhrase) {
-       // If any trigger phrase was used, extract everything after it
-       for (const segment of sessionSegments) {
-         const segmentText = segment.text.toLowerCase();
-         
-         // Find which trigger phrase was used
-         const usedTrigger = triggerPhrases.find(phrase => 
-           segmentText.includes(phrase)
-         );
-         
-         if (usedTrigger) {
-           const patternIndex = segmentText.indexOf(usedTrigger);
-           question = segment.text.substring(patternIndex + usedTrigger.length).trim();
-           break;
-         }
-       }
-       
-       // If no question found after trigger phrase, use remaining segments
-       if (!question) {
-         const triggerIndex = sessionSegments.findIndex(segment => 
-           triggerPhrases.some(phrase => segment.text.toLowerCase().includes(phrase))
-         );
-         if (triggerIndex !== -1) {
-           const remainingSegments = sessionSegments.slice(triggerIndex + 1);
-           question = remainingSegments.map(s => s.text).join(' ').trim();
-         }
-       }
-     } else {
-       // For natural language detection, use the full transcript
-       question = fullTranscript;
-     }
+        // Extract a question only from newly received content to avoid reprocessing prior text
+    let question = '';
+    
+    if (hasTriggerPhrase) {
+      const usedTrigger = triggerPhrases.find(p => transcriptLower.includes(p));
+      if (usedTrigger) {
+        const startIdx = transcriptLower.indexOf(usedTrigger);
+        question = newPortion.substring(startIdx + usedTrigger.length).trim();
+      }
+      if (!question) {
+        question = newPortion.trim();
+      }
+    } else {
+      // Natural language path: use only the new portion
+      question = newPortion.trim();
+    }
     
     if (!question) {
       console.log('⏭️ Skipping transcript - no question after trigger phrase');
@@ -382,57 +398,75 @@ app.post('/omi-webhook', async (req, res) => {
       });
     }
     
-         console.log('🤖 Processing question:', question);
-     
-     // Use OpenAI Responses API with built-in web search
-     console.log('🤖 Using OpenAI Responses API with web search for:', question);
-     
-     let aiResponse = '';
-     
-     try {
-         // Use the new Responses API with web search
-         const response = await openai.responses.create({
-             model: OPENAI_MODEL,
-             tools: [WEB_SEARCH_TOOL],
-             input: question,
-         });
-         
-         aiResponse = response.output_text;
-         console.log('✨ OpenAI Responses API response:', aiResponse);
-         
-         // Log additional response data for debugging
-         if (response.tool_use && response.tool_use.length > 0) {
-             console.log('🔍 Web search tool was used:', response.tool_use);
-         }
-         
-     } catch (error) {
-         console.error('❌ OpenAI Responses API error:', error);
-         
-         // Fallback to regular chat completion if Responses API fails
-         try {
-             const openaiResponse = await openai.chat.completions.create({
-                 model: 'gpt-4o',
-                 messages: [
-                     { 
-                         role: 'system', 
-                         content: 'You are a helpful AI assistant. When users ask about current events, weather, news, or time-sensitive information, be honest about your knowledge cutoff and suggest they check reliable sources for the most up-to-date information. For general knowledge questions, provide helpful and accurate responses.' 
-                     },
-                     { role: 'user', content: question }
-                 ],
-                 max_tokens: 800,
-                 temperature: 0.7,
-             });
-             aiResponse = openaiResponse.choices[0].message.content;
-             console.log('✨ Fallback OpenAI response:', aiResponse);
-         } catch (fallbackError) {
-             console.error('❌ Fallback also failed:', fallbackError);
-             aiResponse = "I'm sorry, I'm experiencing technical difficulties. Please try again later.";
-         }
-     }
+    // Deduplicate identical questions for this session
+    const promptHash = hashText(question);
+    const stateForDedup = sessionState.get(session_id);
+    if (stateForDedup && stateForDedup.lastQuestionHash === promptHash) {
+      console.log('⏭️ Duplicate question detected for this session. Skipping.');
+      stateForDedup.lastTranscript = fullTranscript;
+      stateForDedup.lastActivity = Date.now();
+      sessionState.set(session_id, stateForDedup);
+      sessionTranscripts.set(session_id, []);
+      return res.status(200).json({});
+    }
+    
+        console.log('🤖 Processing question:', question);
+    
+    // Use OpenAI Responses API with built-in web search
+    console.log('🤖 Using OpenAI Responses API with web search for:', question);
+    
+    let aiResponse = '';
+    
+    try {
+        // Use the new Responses API with web search
+        const response = await openai.responses.create({
+            model: OPENAI_MODEL,
+            tools: [WEB_SEARCH_TOOL],
+            input: question,
+            conversation: (sessionState.get(session_id) && sessionState.get(session_id).conversationId) || `conv_${session_id}`,
+        });
+        
+        aiResponse = response.output_text;
+        console.log('✨ OpenAI Responses API response:', aiResponse);
+        
+        // Log additional response data for debugging
+        if (response.tool_use && response.tool_use.length > 0) {
+            console.log('🔍 Web search tool was used:', response.tool_use);
+        }
+        
+    } catch (error) {
+        console.error('❌ OpenAI Responses API error:', error);
+        
+        // Fallback to regular chat completion if Responses API fails
+        try {
+            const openaiResponse = await openai.chat.completions.create({
+                model: 'gpt-4o',
+                messages: [
+                    { 
+                        role: 'system', 
+                        content: 'You are a helpful AI assistant. When users ask about current events, weather, news, or time-sensitive information, be honest about your knowledge cutoff and suggest they check reliable sources for the most up-to-date information. For general knowledge questions, provide helpful and accurate responses.' 
+                    },
+                    { role: 'user', content: question }
+                ],
+                max_tokens: 800,
+                temperature: 0.7,
+            });
+            aiResponse = openaiResponse.choices[0].message.content;
+            console.log('✨ Fallback OpenAI response:', aiResponse);
+        } catch (fallbackError) {
+            console.error('❌ Fallback also failed:', fallbackError);
+            aiResponse = "I'm sorry, I'm experiencing technical difficulties. Please try again later.";
+        }
+    }
     
     // Return response so Omi shows content in chat and sends a single notification
-    sessionTranscripts.delete(session_id);
-    console.log('🧹 Cleared session transcript for:', session_id);
+    const stateAfter = sessionState.get(session_id) || { conversationId: `conv_${session_id}` };
+    stateAfter.lastTranscript = fullTranscript;
+    stateAfter.lastQuestionHash = promptHash;
+    stateAfter.lastActivity = Date.now();
+    sessionState.set(session_id, stateAfter);
+    sessionTranscripts.set(session_id, []);
+    console.log('🧹 Cleared session transcript and updated state for:', session_id);
     return res.status(200).json({ message: aiResponse });
     
   } catch (error) {
@@ -519,6 +553,15 @@ app.listen(PORT, async () => {
        if (hasOldSegment) {
          sessionTranscripts.delete(sessionId);
          console.log('�� Cleaned up old session:', sessionId);
+       }
+     }
+
+     // Also prune idle conversation state older than 30 minutes
+     const thirtyMinutesAgo = now - (30 * 60 * 1000);
+     for (const [sid, st] of sessionState.entries()) {
+       if (st.lastActivity && st.lastActivity < thirtyMinutesAgo) {
+         sessionState.delete(sid);
+         console.log('🧹 Pruned idle conversation state for session:', sid);
        }
      }
    }, 5 * 60 * 1000); // 5 minutes
