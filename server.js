@@ -36,6 +36,33 @@ const PORT = process.env.PORT || 3000;
 
 // Session storage to accumulate transcript segments
 const sessionTranscripts = new Map();
+// Conversation state per Omi session (OpenAI conversation id)
+const sessionConversations = new Map();
+// Last processed question per session to prevent duplicate triggers
+const lastProcessedQuestion = new Map();
+
+// Helpers for duplicate detection
+function normalizeText(text) {
+  if (!text) return '';
+  return text
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isNearDuplicate(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length > b.length ? a : b;
+  if (longer.includes(shorter)) {
+    return shorter.length / longer.length >= 0.9;
+  }
+  return false;
+}
 
 // Rate limiting for Omi notifications (max 10 per hour)
 const notificationQueue = [];
@@ -49,7 +76,7 @@ const openai = new OpenAI({
 });
 
 // OpenAI Responses API configuration
-const OPENAI_MODEL = "gpt-4o"; // You can change this to "gpt-4.1" when available
+const OPENAI_MODEL = "gpt-4o-mini"; // Smaller/cheaper, supports conversation state
 const WEB_SEARCH_TOOL = { type: "web_search_preview" };
 
 // No need to create an assistant - Responses API handles everything
@@ -188,7 +215,8 @@ app.get('/health', (req, res) => {
     api: {
       type: 'OpenAI Responses API',
       model: OPENAI_MODEL,
-      web_search: 'web_search_preview tool enabled'
+      web_search: 'web_search_preview tool enabled',
+      conversation_state: 'enabled (server-managed conversation id per Omi session)'
     }
   });
 });
