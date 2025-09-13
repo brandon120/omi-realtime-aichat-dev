@@ -6,6 +6,7 @@ A Node.js backend plugin for Omi that provides real-time AI chat capabilities us
 
 - **Voice Activation**: Listens for transcripts starting with "hey omi"
 - **Responses + Conversations**: Uses OpenAI's Responses API with Conversations for per-session context
+- **Built-in Web Search (optional)**: Uses the Responses API web_search tool for fresh, real-time info
 - **Real-time Notifications**: Sends responses back to users through Omi's notification API
 - **Error Handling**: Comprehensive error handling and logging
 - **Health Monitoring**: Built-in health check endpoint
@@ -43,6 +44,7 @@ OPENAI_KEY=sk-your-openai-api-key-here
 OMI_APP_ID=your_omi_app_id_here
 OMI_APP_SECRET=your_omi_app_secret_here
 PORT=3000
+ENABLE_WEB_SEARCH=true # set to false to disable Responses API web_search tool
 ```
 
 ### 3. Run Locally
@@ -106,6 +108,7 @@ railway init
 railway variables set OPENAI_KEY=sk-your-openai-api-key-here
 railway variables set OMI_APP_ID=your_omi_app_id_here
 railway variables set OMI_APP_SECRET=your_omi_app_secret_here
+railway variables set ENABLE_WEB_SEARCH=true
 ```
 
 ### 5. Deploy
@@ -206,11 +209,10 @@ The plugin provides comprehensive logging:
 
 ### OpenAI Configuration
 
-The plugin uses these GPT-4 settings:
-- **Model**: `gpt-4`
-- **Max Tokens**: 500
-- **Temperature**: 0.7
-- **System Prompt**: "You are a helpful AI assistant. Provide clear, concise, and helpful responses."
+The plugin uses OpenAI's Responses API:
+- **Model**: `gpt-5-mini-2025-08-07` (default)
+- **Conversations**: Enabled per session
+- **Web Search Tool**: Enabled by default; set `ENABLE_WEB_SEARCH=false` to disable
 
 ### Omi API Configuration
 
@@ -244,6 +246,7 @@ The plugin handles various error scenarios:
 2. Send test webhook payloads
 3. Verify OpenAI responses
 4. Check Omi notification delivery
+5. Ask about a current event to trigger web search (if enabled)
 
 ### Automated Testing
 
