@@ -135,3 +135,45 @@ export async function apiActivateWindow(slot: number): Promise<boolean> {
   }
 }
 
+// Memories
+export type MemoryItem = { id: string; text: string; createdAt: string };
+export async function apiListMemories(limit: number = 50, cursor?: string): Promise<{ items: MemoryItem[]; nextCursor: string | null }> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.get('/memories', { params: { limit, ...(cursor ? { cursor } : {}) } });
+    if (data && data.ok) return { items: data.items, nextCursor: data.nextCursor || null };
+  } catch {}
+  return { items: [], nextCursor: null };
+}
+
+export async function apiCreateMemory(text: string): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.post('/memories', { text });
+    return !!(data && data.ok);
+  } catch {
+    return false;
+  }
+}
+
+// Agent events (tasks)
+export type AgentEventItem = { id: string; type: string; payload?: any; createdAt: string };
+export async function apiListAgentEvents(limit: number = 50, cursor?: string): Promise<{ items: AgentEventItem[]; nextCursor: string | null }> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.get('/agent-events', { params: { limit, ...(cursor ? { cursor } : {}) } });
+    if (data && data.ok) return { items: data.items, nextCursor: data.nextCursor || null };
+  } catch {}
+  return { items: [], nextCursor: null };
+}
+
+export async function apiCreateTask(text: string): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.post('/agent-events', { type: 'task_created', payload: { text } });
+    return !!(data && data.ok);
+  } catch {
+    return false;
+  }
+}
+
