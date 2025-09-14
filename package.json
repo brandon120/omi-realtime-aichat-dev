@@ -8,7 +8,9 @@
     "dev": "nodemon server.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev --name init",
-    "prisma:deploy": "prisma migrate deploy"
+    "prisma:deploy": "prisma migrate deploy",
+    "db:dev": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy"
   },
   "keywords": [
     "omi",

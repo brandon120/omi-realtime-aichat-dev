@@ -770,6 +770,128 @@ if (ENABLE_USER_SYSTEM) {
       res.status(500).json({ error: 'Failed to load profile' });
     }
   });
+
+  // ---- Account management ----
+  // Get account profile (duplicate of /me but stable path)
+  app.get('/account/profile', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const links = await prisma.omiUserLink.findMany({
+        where: { userId: req.user.id },
+        select: { omiUserId: true, isVerified: true, verifiedAt: true }
+      });
+      res.status(200).json({ ok: true, user: req.user, omi_links: links });
+    } catch (e) {
+      console.error('Account profile error:', e);
+      res.status(500).json({ error: 'Failed to load account profile' });
+    }
+  });
+
+  // Update display name
+  app.patch('/account/profile', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const { display_name } = req.body || {};
+      const newDisplayName = (display_name ?? '').toString().trim();
+      const updated = await prisma.user.update({
+        where: { id: req.user.id },
+        data: { displayName: newDisplayName || null }
+      });
+      res.status(200).json({ ok: true, user: { id: updated.id, email: updated.email, displayName: updated.displayName, role: updated.role } });
+    } catch (e) {
+      console.error('Update profile error:', e);
+      res.status(500).json({ error: 'Failed to update profile' });
+    }
+  });
+
+  // Change password
+  app.post('/account/password', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const { current_password, new_password } = req.body || {};
+      const curr = (current_password || '').toString();
+      const next = (new_password || '').toString();
+      if (!curr || !next || next.length < 8) {
+        return res.status(400).json({ error: 'Invalid password (min 8 chars)' });
+      }
+      const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+      if (!user) return res.status(404).json({ error: 'User not found' });
+      const ok = await argon2.verify(user.passwordHash, curr);
+      if (!ok) return res.status(401).json({ error: 'Current password incorrect' });
+      const passwordHash = await argon2.hash(next);
+      await prisma.user.update({ where: { id: req.user.id }, data: { passwordHash } });
+      res.status(200).json({ ok: true });
+    } catch (e) {
+      console.error('Change password error:', e);
+      res.status(500).json({ error: 'Failed to change password' });
+    }
+  });
+
+  // List sessions for current user
+  app.get('/account/sessions', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const sid = getSidFromRequest(req);
+      const sessions = await prisma.authSession.findMany({
+        where: { userId: req.user.id },
+        orderBy: { createdAt: 'desc' },
+        select: { sessionToken: true, createdAt: true, expiresAt: true }
+      });
+      const items = sessions.map(s => ({
+        token_preview: s.sessionToken.slice(0, 6) + '…' + s.sessionToken.slice(-4),
+        is_current: s.sessionToken === sid,
+        createdAt: s.createdAt,
+        expiresAt: s.expiresAt
+      }));
+      res.status(200).json({ ok: true, items });
+    } catch (e) {
+      console.error('List sessions error:', e);
+      res.status(500).json({ error: 'Failed to list sessions' });
+    }
+  });
+
+  // Revoke sessions
+  app.post('/account/sessions/revoke', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const { session_token, revoke_others } = req.body || {};
+      const sid = getSidFromRequest(req);
+      if (session_token) {
+        // Revoke a specific session if it belongs to the user
+        await prisma.authSession.delete({ where: { sessionToken: String(session_token) } }).catch(() => {});
+        return res.status(200).json({ ok: true });
+      }
+      if (revoke_others) {
+        await prisma.authSession.deleteMany({ where: { userId: req.user.id, NOT: { sessionToken: sid || '' } } });
+        return res.status(200).json({ ok: true });
+      }
+      // Default: revoke current session (logout)
+      if (sid) {
+        await prisma.authSession.delete({ where: { sessionToken: sid } }).catch(() => {});
+      }
+      res.clearCookie('sid', getCookieOptions());
+      return res.status(200).json({ ok: true });
+    } catch (e) {
+      console.error('Revoke sessions error:', e);
+      res.status(500).json({ error: 'Failed to revoke sessions' });
+    }
+  });
+
+  // Delete account
+  app.delete('/account', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const sid = getSidFromRequest(req);
+      // Best-effort: delete all sessions first
+      await prisma.authSession.deleteMany({ where: { userId: req.user.id } }).catch(() => {});
+      await prisma.user.delete({ where: { id: req.user.id } });
+      if (sid) res.clearCookie('sid', getCookieOptions());
+      res.status(200).json({ ok: true });
+    } catch (e) {
+      console.error('Delete account error:', e);
+      res.status(500).json({ error: 'Failed to delete account' });
+    }
+  });
 }
 
 // --------- OMI linking routes (feature-flagged) ---------
@@ -846,6 +968,62 @@ if (ENABLE_USER_SYSTEM) {
     } catch (e) {
       console.error('Link confirm error:', e);
       res.status(500).json({ error: 'Failed to confirm OMI linking' });
+    }
+  });
+
+  // List linked Omi IDs
+  app.get('/link/omi', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const links = await prisma.omiUserLink.findMany({
+        where: { userId: req.user.id },
+        orderBy: { createdAt: 'desc' },
+        select: { omiUserId: true, isVerified: true, verifiedAt: true, createdAt: true }
+      });
+      res.status(200).json({ ok: true, items: links });
+    } catch (e) {
+      console.error('List OMI links error:', e);
+      res.status(500).json({ error: 'Failed to list OMI links' });
+    }
+  });
+
+  // Resend verification code to an Omi user id
+  app.post('/link/omi/resend', requireAuth, linkThrottle(3, 60 * 1000), async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const { omi_user_id } = req.body || {};
+      const omiUserId = (omi_user_id || '').toString().trim();
+      if (!omiUserId) return res.status(400).json({ error: 'omi_user_id is required' });
+      const code = generateOtpCode();
+      const expiresAt = new Date(Date.now() + OTP_TTL_MS);
+      const link = await prisma.omiUserLink.upsert({
+        where: { omiUserId },
+        update: { userId: req.user.id, verificationCode: code, verificationExpiresAt: expiresAt, verificationAttempts: 0, isVerified: false },
+        create: { userId: req.user.id, omiUserId, verificationCode: code, verificationExpiresAt: expiresAt }
+      });
+      try {
+        await sendOmiNotification(omiUserId, `Your verification code is ${code}. It expires in 10 minutes.`);
+      } catch (notifyErr) {
+        console.warn('Failed to resend OMI notification:', notifyErr?.message || notifyErr);
+      }
+      const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+      res.status(200).json({ ok: true, omi_user_id: omiUserId, ...(isProduction ? {} : { dev_code: code }) });
+    } catch (e) {
+      console.error('Resend OMI code error:', e);
+      res.status(500).json({ error: 'Failed to resend verification code' });
+    }
+  });
+
+  // Unlink an Omi user id
+  app.delete('/link/omi/:omiUserId', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const omiUserId = String(req.params.omiUserId);
+      await prisma.omiUserLink.delete({ where: { omiUserId } }).catch(() => {});
+      res.status(200).json({ ok: true });
+    } catch (e) {
+      console.error('Unlink OMI error:', e);
+      res.status(500).json({ error: 'Failed to unlink OMI user' });
     }
   });
 }
