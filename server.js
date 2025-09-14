@@ -285,12 +285,37 @@ const MAX_NOTIFICATIONS_PER_HOUR = 10;
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour in milliseconds
 
 // Initialize OpenAI client (prefer OPENAI_API_KEY per latest SDK docs)
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || process.env.OPENAI_KEY,
-});
+function createMockOpenAI() {
+  return {
+    responses: {
+      create: async (payload) => ({ output_text: `MOCK_RESPONSE: ${payload.input}` })
+    },
+    chat: {
+      completions: {
+        create: async () => ({ choices: [{ message: { content: 'MOCK_CHAT_RESPONSE' } }] })
+      }
+    },
+    conversations: {
+      create: async ({ metadata }) => ({ id: `mock-conv-${(metadata && (metadata.omi_session_id || metadata.typed_user_id)) || 'test'}` })
+    }
+  };
+}
+
+function createOpenAIClient() {
+  const useMock = String(process.env.MOCK_OPENAI || (process.env.NODE_ENV === 'test')).toLowerCase() === 'true' || process.env.NODE_ENV === 'test';
+  if (useMock) {
+    console.log('🧪 Using MOCK OpenAI client');
+    return createMockOpenAI();
+  }
+  return new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY || process.env.OPENAI_KEY,
+  });
+}
+
+const openai = createOpenAIClient();
 
 // OpenAI Responses API configuration
-const OPENAI_MODEL = "gpt-5-mini-2025-08-07"; // Smaller/cheaper, supports conversation state
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini-2025-08-07"; // Smaller/cheaper, supports conversation state
 
 // No need to create an assistant - Responses API handles everything
 console.log('✅ Using OpenAI Responses API with Conversations');
@@ -1323,7 +1348,8 @@ app.use('*', (req, res) => {
   });
 });
 
-// Start server
+// Start server (only when executed directly)
+if (require.main === module) {
 app.listen(PORT, async () => {
   console.log('🚀 Omi AI Chat Plugin server started');
   console.log(`📍 Server running on port ${PORT}`);
@@ -1390,3 +1416,6 @@ app.listen(PORT, async () => {
   
   console.log('✅ Server ready to receive Omi webhooks');
 });
+}
+
+module.exports = { app };
