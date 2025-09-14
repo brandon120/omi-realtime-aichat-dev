@@ -532,6 +532,22 @@ async function getSession(prismaClient, token) {
 }
 
 function getSidFromRequest(req) {
+  // Prefer Authorization header: "Bearer <sid>" or "Sid <sid>"
+  try {
+    const authHeader = req.headers && (req.headers.authorization || req.headers.Authorization);
+    if (authHeader && typeof authHeader === 'string') {
+      const parts = authHeader.split(' ');
+      if (parts.length === 2) {
+        const scheme = parts[0].toLowerCase();
+        const token = parts[1];
+        if ((scheme === 'bearer' || scheme === 'sid') && token) {
+          return token;
+        }
+      }
+    }
+  } catch {}
+
+  // Fallback to cookie
   const signedSid = req.signedCookies ? req.signedCookies.sid : undefined;
   const plainSid = req.cookies ? req.cookies.sid : undefined;
   return signedSid || plainSid;
@@ -686,7 +702,7 @@ if (ENABLE_USER_SYSTEM) {
       });
       const { token } = await createSession(prisma, user.id);
       res.cookie('sid', token, getCookieOptions());
-      res.status(201).json({ ok: true, user: { id: user.id, email: user.email, displayName: user.displayName } });
+      res.status(201).json({ ok: true, session_token: token, user: { id: user.id, email: user.email, displayName: user.displayName } });
     } catch (e) {
       console.error('Register error:', e);
       res.status(500).json({ error: 'Registration failed' });
@@ -708,7 +724,7 @@ if (ENABLE_USER_SYSTEM) {
       if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
       const { token } = await createSession(prisma, user.id);
       res.cookie('sid', token, getCookieOptions());
-      res.status(200).json({ ok: true, user: { id: user.id, email: user.email, displayName: user.displayName } });
+      res.status(200).json({ ok: true, session_token: token, user: { id: user.id, email: user.email, displayName: user.displayName } });
     } catch (e) {
       console.error('Login error:', e);
       res.status(500).json({ error: 'Login failed' });
