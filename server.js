@@ -151,7 +151,7 @@ if (ENABLE_USER_SYSTEM) {
           data: {
             conversationId: conversation.id,
             role: 'ASSISTANT',
-            text: assistantText,
+            text: formatTypedMessageWithLabels(req.user.id, assistantText),
             source: 'SYSTEM'
           }
         });
@@ -159,7 +159,7 @@ if (ENABLE_USER_SYSTEM) {
         console.warn('Failed to persist assistant message:', err?.message || err);
       }
 
-      res.status(200).json({ ok: true, conversation_id: conversation.id, assistant_text: assistantText });
+      res.status(200).json({ ok: true, conversation_id: conversation.id, assistant_text: formatTypedMessageWithLabels(req.user.id, assistantText) });
     } catch (e) {
       console.error('Send message error:', e);
       res.status(500).json({ error: 'Failed to send message' });
@@ -237,6 +237,67 @@ if (ENABLE_USER_SYSTEM) {
       res.status(500).json({ error: 'Failed to list messages' });
     }
   });
+
+  // Create follow-up item and send as notification to the user
+  app.post('/followups', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const { conversation_id, message } = req.body || {};
+      const text = String(message || '').trim();
+      if (!text) return res.status(400).json({ error: 'message is required' });
+
+      let convo = null;
+      if (conversation_id) {
+        convo = await prisma.conversation.findFirst({
+          where: { id: String(conversation_id), OR: [ { userId: req.user.id }, { omiSession: { userId: req.user.id } } ] },
+          select: { id: true }
+        });
+        if (!convo) return res.status(404).json({ error: 'Conversation not found' });
+      }
+
+      // Persist notification event
+      const event = await prisma.notificationEvent.create({
+        data: {
+          userId: req.user.id,
+          channel: 'OMI',
+          message: text,
+          status: 'queued'
+        }
+      });
+
+      // Attempt to send via OMI if linked
+      let delivered = false;
+      let errorMessage = null;
+      try {
+        const links = await prisma.omiUserLink.findMany({ where: { userId: req.user.id, isVerified: true }, select: { omiUserId: true } });
+        if (links.length > 0) {
+          for (const link of links) {
+            try {
+              await sendOmiNotification(link.omiUserId, text);
+              delivered = true;
+              break;
+            } catch (e) {
+              errorMessage = e?.message || String(e);
+            }
+          }
+        } else {
+          errorMessage = 'No verified OMI link';
+        }
+      } catch (e) {
+        errorMessage = e?.message || String(e);
+      }
+
+      // Update event status
+      try {
+        await prisma.notificationEvent.update({ where: { id: event.id }, data: { status: delivered ? 'sent' : 'error', error: delivered ? null : errorMessage } });
+      } catch {}
+
+      res.status(200).json({ ok: true, delivered, followup_id: event.id, error: delivered ? null : errorMessage });
+    } catch (e) {
+      console.error('Followups API error:', e);
+      res.status(500).json({ error: 'Failed to create follow-up' });
+    }
+  });
 }
 /**
  * Omi AI Chat Plugin Server
@@ -274,6 +335,57 @@ const sessionTranscripts = new Map();
 const sessionConversations = new Map();
 // Last processed question per session to prevent duplicate triggers
 const lastProcessedQuestion = new Map();
+
+// Context/state per Omi session
+// space: default | todos | memories | tasks | agent | friends | notifications
+// pending: { type: 'window_switch', options: Array<{num:number, slot:number, conversationId?:string, title?:string|null, summary?:string|null, createdAt?:string}> } | { type: 'space_switch' } | null
+const sessionContextState = new Map();
+
+// Lightweight activation metrics
+const activationCounters = {
+  explicitTriggers: 0,
+  suppressedDuplicates: 0,
+  helpRequests: 0,
+  menuOpens: 0,
+  aiResponses: 0
+};
+
+function getOrInitSessionState(sessionId) {
+  if (!sessionContextState.has(sessionId)) {
+    sessionContextState.set(sessionId, { space: 'default', pending: null });
+  }
+  return sessionContextState.get(sessionId);
+}
+
+function formatMessageWithLabels(sessionId, content) {
+  try {
+    const now = new Date();
+    const state = getOrInitSessionState(sessionId);
+    const header = `[${now.toLocaleString()} • Space: ${state.space}]`;
+    return `${header}\n${content}`;
+  } catch {
+    return content;
+  }
+}
+
+// User-level context space for typed flows
+const userContextSpace = new Map(); // userId -> space
+function getOrInitUserSpace(userId) {
+  if (!userContextSpace.has(userId)) {
+    userContextSpace.set(userId, 'default');
+  }
+  return userContextSpace.get(userId);
+}
+function formatTypedMessageWithLabels(userId, content) {
+  try {
+    const now = new Date();
+    const space = getOrInitUserSpace(userId);
+    const header = `[${now.toLocaleString()} • Space: ${space}]`;
+    return `${header}\n${content}`;
+  } catch {
+    return content;
+  }
+}
 
 // Helpers for duplicate detection
 function normalizeText(text) {
@@ -625,11 +737,7 @@ app.get('/health', (req, res) => {
     status: 'OK', 
     message: 'Omi AI Chat Plugin is running',
     trigger_phrases: [
-      'Hey Omi', 'Hey, Omi', 'Hey Omi,', 'Hey, Omi,',
-      'Hey Jarvis', 'Hey, Jarvis', 'Hey Jarvis,', 'Hey, Jarvis,',
-      'Hey Echo', 'Hey, Echo', 'Hey Echo,', 'Hey, Echo,',
-      'Hey Assistant', 'Hey, Assistant', 'Hey Assistant,', 'Hey, Assistant,',
-      'hey'
+      'Hey Omi', 'Hey, Omi', 'Hey Omi,', 'Hey, Omi,'
     ],
     help_keywords: [
       'help', 'what can you do', 'how to use', 'instructions', 'guide',
@@ -672,19 +780,13 @@ app.get('/help', (req, res) => {
     trigger_phrases: {
       description: 'Start your message with one of these phrases to activate the AI:',
       phrases: [
-        'Hey Omi', 'Hey, Omi', 'Hey Omi,', 'Hey, Omi,',
-        'Hey Jarvis', 'Hey, Jarvis', 'Hey Jarvis,', 'Hey, Jarvis,',
-        'Hey Echo', 'Hey, Echo', 'Hey Echo,', 'Hey, Echo,',
-        'Hey Assistant', 'Hey, Assistant', 'Hey Assistant,', 'Hey, Assistant,',
-        'hey'
+        'Hey Omi', 'Hey, Omi', 'Hey Omi,', 'Hey, Omi,'
       ]
     },
     examples: [
       'Hey Omi, what is the weather like in Sydney, Australia?',
-      'Hey Jarvis, can you help me solve a math problem?',
-      'Hey Echo, what are the latest news headlines?',
-      'Hey Assistant, how do I make a chocolate cake?',
-      'hey what time is it?'
+      'Hey Omi, can you help me solve a math problem?',
+      'Hey Omi, what are the latest news headlines?'
     ],
     help_keywords: {
       description: 'You can also ask for help using these words:',
@@ -694,7 +796,7 @@ app.get('/help', (req, res) => {
         'keywords', 'trigger words', 'how to talk to you'
       ]
     },
-    note: 'The AI will only respond when you use the trigger phrases. Regular messages without these phrases will be ignored unless you\'re asking for help.',
+    note: 'The AI will only respond when you use the "Hey Omi" trigger phrases.',
     features: {
       web_search: 'Built-in web search for current information',
       natural_language: 'Understands natural conversation patterns',
@@ -1102,6 +1204,11 @@ app.get('/rate-limit/:userId', (req, res) => {
   });
 });
 
+// Activation metrics (no auth; informational only)
+app.get('/metrics/activation', (req, res) => {
+  res.status(200).json({ ok: true, counters: activationCounters });
+});
+
 // ---- OMI Import REST endpoints ----
 
 // Create Conversation
@@ -1235,65 +1342,16 @@ app.post('/omi-webhook', async (req, res) => {
       }
     }
     
-        // Smart AI interaction detection
+    // Context-gated AI activation: only respond to explicit "Hey Omi" variants
     const transcriptLower = fullTranscript.toLowerCase();
-    
-    // Primary trigger: Multiple AI assistant variations
     const triggerPhrases = [
-      // Omi variations
-      'hey omi', 'hey, omi', 'hey omi,', 'hey, omi,',
-      // Jarvis variations (Iron Man style)
-      'hey jarvis', 'hey, jarvis', 'hey jarvis,', 'hey, jarvis,',
-      // Echo variations (Amazon Alexa style)
-      'hey echo', 'hey, echo', 'hey echo,', 'hey, echo,',
-      // Assistant variations (Google Assistant style)
-      'hey assistant', 'hey, assistant', 'hey assistant,', 'hey, assistant,',
-      // Simple trigger
-      'hey'
+      'hey omi', 'hey, omi', 'hey omi,', 'hey, omi,'
     ];
-    
-    const hasTriggerPhrase = triggerPhrases.some(phrase => 
-      transcriptLower.includes(phrase)
-    );
-    
-    // Secondary triggers: Natural language patterns
-    const isQuestion = /\b(who|what|where|when|why|how|can you|could you|would you|tell me|show me|find|search|look up)\b/i.test(fullTranscript);
-    const isCommand = /\b(weather|news|temperature|time|date|current|today|now|latest|help me|i need|find out)\b/i.test(fullTranscript);
-    const isConversational = fullTranscript.endsWith('?') || fullTranscript.includes('?');
-    
-    // Help keywords
-    const helpKeywords = [
-      'help', 'what can you do', 'how to use', 'instructions', 'guide',
-      'what do you do', 'how does this work', 'what are the commands',
-      'keywords', 'trigger words', 'how to talk to you'
-    ];
-    
-    const isAskingForHelp = helpKeywords.some(keyword => 
-      transcriptLower.includes(keyword)
-    );
-    
-    // Determine if user wants AI interaction
-    const wantsAIInteraction = hasTriggerPhrase || (isQuestion && isCommand) || (isConversational && isCommand);
-    
-    if (!wantsAIInteraction) {
-      if (isAskingForHelp) {
-        // User is asking for help, provide helpful response
-        const helpMessage = `Hi! I'm Omi, your AI assistant. You can talk to me naturally! Try asking questions like "What's the weather like?" or "Can you search for current news?" I'll automatically detect when you need my help.`;
-        
-        console.log('💡 User asked for help, providing instructions');
-        // Clear the session transcript after help response
-        sessionTranscripts.delete(session_id);
-        console.log('🧹 Cleared session transcript for help request:', session_id);
-        return res.status(200).json({ 
-          message: 'You can talk to me naturally! Try asking questions or giving commands.',
-          help_response: helpMessage,
-          instructions: 'Ask questions naturally or use trigger phrases like "Hey Omi", "Hey Jarvis", "Hey Echo", "Hey Assistant", or just "hey" to be explicit.'
-        });
-      } else {
-        // User didn't trigger AI interaction - silently ignore
-        console.log('⏭️ Skipping transcript - no AI interaction detected:', fullTranscript);
-        return res.status(200).json({}); // Return empty response - no message
-      }
+    const hasTriggerPhrase = triggerPhrases.some((phrase) => transcriptLower.includes(phrase));
+
+    if (!hasTriggerPhrase) {
+      console.log('⏭️ Skipping transcript - explicit trigger not detected');
+      return res.status(200).json({});
     }
     
          // Extract the question from the accumulated transcript
@@ -1326,9 +1384,6 @@ app.post('/omi-webhook', async (req, res) => {
            question = remainingSegments.map(s => s.text).join(' ').trim();
          }
        }
-     } else {
-       // For natural language detection, use the full transcript
-       question = fullTranscript;
      }
     
     if (!question) {
@@ -1343,12 +1398,149 @@ app.post('/omi-webhook', async (req, res) => {
     const last = lastProcessedQuestion.get(session_id);
     const COOLDOWN_MS = 10 * 1000; // 10 seconds
     if (last && (Date.now() - last.ts) < COOLDOWN_MS && isNearDuplicate(last.normalized, normalizedQuestion)) {
+      activationCounters.suppressedDuplicates++;
       console.log('⏭️ Suppressing near-duplicate within cooldown window:', question);
       return res.status(200).json({});
     }
     lastProcessedQuestion.set(session_id, { normalized: normalizedQuestion, ts: Date.now() });
 
-        console.log('🤖 Processing question:', question);
+    activationCounters.explicitTriggers++;
+    console.log('🤖 Processing question:', question);
+
+    // Session context
+    const state = getOrInitSessionState(session_id);
+
+    // Intent: menu/help
+    if (/\b(menu|what can you do|help|options)\b/i.test(question)) {
+      activationCounters.menuOpens++;
+      const menu = [
+        '- Say: "Hey Omi, list conversations"',
+        '- Say: "Hey Omi, change conversation window"',
+        '- Spaces: todos, memories, tasks, agent, friends, notifications'
+      ].join('\n');
+      const msg = formatMessageWithLabels(session_id, `Menu:\n${menu}`);
+      sessionTranscripts.delete(session_id);
+      return res.status(200).json({ message: msg });
+    }
+
+    // Handle pending selection (window switch)
+    if (state.pending && state.pending.type === 'window_switch') {
+      const lowerQ = question.toLowerCase();
+      if (/\bcancel\b/.test(lowerQ)) {
+        state.pending = null;
+        const msg = formatMessageWithLabels(session_id, 'Canceled.');
+        sessionTranscripts.delete(session_id);
+        return res.status(200).json({ message: msg });
+      }
+      const numMatch = lowerQ.match(/\b(select\s+window\s+|select\s+|window\s+)?([1-5])\b/);
+      if (numMatch) {
+        const chosen = Number(numMatch[2]);
+        try {
+          if (ENABLE_USER_SYSTEM && prisma) {
+            const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
+            if (sessionRow && sessionRow.userId) {
+              // Ensure window exists
+              let contextWindow = await prisma.userContextWindow.findUnique({ where: { userId_slot: { userId: sessionRow.userId, slot: chosen } } });
+              if (!contextWindow) {
+                const conversation = await prisma.conversation.create({ data: { userId: sessionRow.userId, openaiConversationId: '' } });
+                contextWindow = await prisma.userContextWindow.create({ data: { userId: sessionRow.userId, slot: chosen, conversationId: conversation.id, isActive: true } });
+              }
+              // Make this window active and others inactive
+              await prisma.userContextWindow.updateMany({ where: { userId: sessionRow.userId }, data: { isActive: false } });
+              await prisma.userContextWindow.update({ where: { userId_slot: { userId: sessionRow.userId, slot: chosen } }, data: { isActive: true } });
+              // Brief context summary
+              const summaryRow = await prisma.conversation.findUnique({ where: { id: contextWindow.conversationId }, select: { title: true, summary: true, createdAt: true } });
+              const summaryText = `Switched to window ${chosen}.` + (summaryRow ? ` Title: ${summaryRow.title || 'Untitled'}.` + (summaryRow.summary ? ` ${summaryRow.summary}` : '') : '');
+              state.pending = null;
+              const msg = formatMessageWithLabels(session_id, summaryText.trim());
+              sessionTranscripts.delete(session_id);
+              return res.status(200).json({ message: msg });
+            }
+          }
+        } catch (e) {
+          console.warn('Window switch error:', e?.message || e);
+        }
+        state.pending = null;
+        const msg = formatMessageWithLabels(session_id, 'Unable to switch window right now.');
+        sessionTranscripts.delete(session_id);
+        return res.status(200).json({ message: msg });
+      }
+      // Not recognized; ask again
+      const msg = formatMessageWithLabels(session_id, 'Please say: select window 1-5, or say cancel.');
+      sessionTranscripts.delete(session_id);
+      return res.status(200).json({ message: msg });
+    }
+
+    // Intent: list conversations (mapped to context windows)
+    if (/\b(list|show)\s+(conversations|windows)\b/i.test(question)) {
+      if (ENABLE_USER_SYSTEM && prisma) {
+        try {
+          const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
+          if (sessionRow && sessionRow.userId) {
+            const windows = await prisma.userContextWindow.findMany({ where: { userId: sessionRow.userId }, include: { conversation: { select: { title: true, summary: true, createdAt: true } } }, orderBy: { slot: 'asc' } });
+            // Ensure all 1..5 represented
+            const present = new Set(windows.map(w => w.slot));
+            for (let s = 1; s <= 5; s++) {
+              if (!present.has(s)) {
+                // Fill placeholders without creating DB rows
+                windows.push({ slot: s, isActive: false, conversationId: '', userId: sessionRow.userId, id: '', createdAt: new Date(), conversation: null });
+              }
+            }
+            const sorted = windows.sort((a, b) => a.slot - b.slot);
+            const lines = sorted.map(w => {
+              const flag = w.isActive ? '[Active] ' : '';
+              const conv = w.conversation;
+              if (!conv) return `${w.slot}) ${flag}<empty>`;
+              const title = conv.title || 'Untitled';
+              const summary = conv.summary ? ` — ${conv.summary}` : '';
+              return `${w.slot}) ${flag}${title}${summary}`;
+            });
+            const msg = formatMessageWithLabels(session_id, `Conversations:\n${lines.join('\n')}`);
+            sessionTranscripts.delete(session_id);
+            return res.status(200).json({ message: msg });
+          }
+        } catch (e) {
+          console.warn('List conversations error:', e?.message || e);
+        }
+      }
+      const msg = formatMessageWithLabels(session_id, 'No conversations found.');
+      sessionTranscripts.delete(session_id);
+      return res.status(200).json({ message: msg });
+    }
+
+    // Intent: change conversation window -> prompt for selection
+    if (/\b(change|switch)\s+(conversation\s+window|window|context)\b/i.test(question)) {
+      if (ENABLE_USER_SYSTEM && prisma) {
+        try {
+          const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
+          if (sessionRow && sessionRow.userId) {
+            // Prepare list (without guaranteeing rows exist)
+            const windows = await prisma.userContextWindow.findMany({ where: { userId: sessionRow.userId }, include: { conversation: { select: { title: true, summary: true } } }, orderBy: { slot: 'asc' } });
+            const present = new Set(windows.map(w => w.slot));
+            for (let s = 1; s <= 5; s++) {
+              if (!present.has(s)) windows.push({ slot: s, isActive: false, conversationId: '', userId: sessionRow.userId, id: '', createdAt: new Date(), conversation: null });
+            }
+            const sorted = windows.sort((a, b) => a.slot - b.slot).map(w => ({
+              num: w.slot,
+              slot: w.slot,
+              conversationId: w.conversationId || null,
+              title: (w.conversation && w.conversation.title) || null,
+              summary: (w.conversation && w.conversation.summary) || null
+            }));
+            sessionContextState.set(session_id, { ...state, pending: { type: 'window_switch', options: sorted } });
+            const lines = sorted.map(o => `${o.num}) ${(o.title || '<empty>')}${o.summary ? ' — ' + o.summary : ''}`);
+            const msg = formatMessageWithLabels(session_id, `Which conversation window would you like to select?\n${lines.join('\n')}\nSay: select window 1-5, or say cancel.`);
+            sessionTranscripts.delete(session_id);
+            return res.status(200).json({ message: msg });
+          }
+        } catch (e) {
+          console.warn('Change window intent error:', e?.message || e);
+        }
+      }
+      const msg = formatMessageWithLabels(session_id, 'I could not access your windows.');
+      sessionTranscripts.delete(session_id);
+      return res.status(200).json({ message: msg });
+    }
     
     // ---- OMI Import intent hooks ----
     const uid = req.body?.user_id || req.query?.uid; // allow either source of uid
