@@ -4,7 +4,7 @@
   "description": "Omi plugin backend for real-time AI chat using OpenAI GPT-4",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "npx prisma generate && npx prisma migrate deploy && node server.js",
     "dev": "nodemon server.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev --name init",
