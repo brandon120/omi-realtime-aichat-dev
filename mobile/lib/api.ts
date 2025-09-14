@@ -96,3 +96,42 @@ export async function apiConfirmOmiLink(omi_user_id: string, code: string): Prom
   return !!(data && data.ok);
 }
 
+// Spaces & Windows
+export async function apiGetSpaces(): Promise<{ active: string; spaces: string[] } | null> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.get('/spaces');
+    if (data && data.ok) return { active: data.active, spaces: data.spaces };
+  } catch {}
+  return null;
+}
+
+export async function apiSwitchSpace(space: string): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.post('/spaces/switch', { space });
+    return !!(data && data.ok);
+  } catch {
+    return false;
+  }
+}
+
+export async function apiListWindows(): Promise<Array<{ slot: number; isActive: boolean; title?: string | null; summary?: string | null }>> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.get('/windows');
+    if (data && data.ok) return data.items;
+  } catch {}
+  return [];
+}
+
+export async function apiActivateWindow(slot: number): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.post('/windows/activate', { slot });
+    return !!(data && data.ok);
+  } catch {
+    return false;
+  }
+}
+

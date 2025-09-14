@@ -147,11 +147,12 @@ if (ENABLE_USER_SYSTEM) {
 
       // Persist assistant message
       try {
+        const formatted = await formatTypedMessageWithLabelsAndFooter(req.user.id, assistantText);
         await prisma.message.create({
           data: {
             conversationId: conversation.id,
             role: 'ASSISTANT',
-            text: formatTypedMessageWithLabels(req.user.id, assistantText),
+            text: formatted,
             source: 'SYSTEM'
           }
         });
@@ -159,7 +160,8 @@ if (ENABLE_USER_SYSTEM) {
         console.warn('Failed to persist assistant message:', err?.message || err);
       }
 
-      res.status(200).json({ ok: true, conversation_id: conversation.id, assistant_text: formatTypedMessageWithLabels(req.user.id, assistantText) });
+      const responseText = await formatTypedMessageWithLabelsAndFooter(req.user.id, assistantText);
+      res.status(200).json({ ok: true, conversation_id: conversation.id, assistant_text: responseText });
     } catch (e) {
       console.error('Send message error:', e);
       res.status(500).json({ error: 'Failed to send message' });
@@ -340,6 +342,7 @@ const lastProcessedQuestion = new Map();
 // space: default | todos | memories | tasks | agent | friends | notifications
 // pending: { type: 'window_switch', options: Array<{num:number, slot:number, conversationId?:string, title?:string|null, summary?:string|null, createdAt?:string}> } | { type: 'space_switch' } | null
 const sessionContextState = new Map();
+const ALLOWED_SPACES = ['default', 'todos', 'memories', 'tasks', 'agent', 'friends', 'notifications'];
 
 // Lightweight activation metrics
 const activationCounters = {
@@ -368,6 +371,89 @@ function formatMessageWithLabels(sessionId, content) {
   }
 }
 
+async function findLinkedUserIdForSession(sessionId) {
+  if (!ENABLE_USER_SYSTEM || !prisma) return null;
+  try {
+    const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(sessionId) } });
+    return sessionRow && sessionRow.userId ? sessionRow.userId : null;
+  } catch {
+    return null;
+  }
+}
+
+async function buildSpaceFooterForUser(userId, spaceName) {
+  if (!ENABLE_USER_SYSTEM || !prisma || !userId) return '';
+  const safeSpace = (spaceName || 'default');
+  try {
+    if (safeSpace === 'default') {
+      const active = await prisma.userContextWindow.findFirst({
+        where: { userId, isActive: true },
+        include: { conversation: { select: { title: true, summary: true, createdAt: true } } }
+      });
+      if (!active) return 'Active window: none';
+      const title = active.conversation?.title || 'Untitled';
+      const summary = active.conversation?.summary ? ` — ${active.conversation.summary}` : '';
+      return `Active window ${active.slot}: ${title}${summary}`.trim();
+    }
+
+    if (safeSpace === 'memories') {
+      const memories = await prisma.memory.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: 3 });
+      if (!memories.length) return 'No memories yet';
+      return memories.map((m, i) => `${i + 1}. ${m.text}`).join('\n');
+    }
+
+    if (safeSpace === 'notifications') {
+      const events = await prisma.notificationEvent.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: 3 });
+      if (!events.length) return 'No notifications';
+      return events.map((e, i) => `${i + 1}. [${e.channel}] ${e.message} — ${e.status}`).join('\n');
+    }
+
+    if (safeSpace === 'tasks' || safeSpace === 'todos') {
+      // Without a dedicated table, show recent agent events as tasks
+      const events = await prisma.agentEvent.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: 3 });
+      if (!events.length) return 'No tasks yet';
+      return events.map((e, i) => `${i + 1}. ${e.type}${e.payload ? ' — ' + JSON.stringify(e.payload).slice(0, 80) : ''}`).join('\n');
+    }
+
+    if (safeSpace === 'agent') {
+      const last = await prisma.agentEvent.findFirst({ where: { userId }, orderBy: { createdAt: 'desc' } });
+      if (!last) return 'Agent idle';
+      return `Last agent event: ${last.type}${last.payload ? ' — ' + JSON.stringify(last.payload).slice(0, 120) : ''}`;
+    }
+
+    if (safeSpace === 'friends') {
+      // Not implemented: show OMI links as connected identities
+      const links = await prisma.omiUserLink.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: 3 });
+      if (!links.length) return 'No friends connected';
+      return links.map((l, i) => `${i + 1}. OMI:${l.omiUserId} — ${l.isVerified ? 'verified' : 'unverified'}`).join('\n');
+    }
+
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+async function buildSpaceFooterForSession(sessionId) {
+  const userId = await findLinkedUserIdForSession(sessionId);
+  const state = getOrInitSessionState(sessionId);
+  if (!userId) return '';
+  return buildSpaceFooterForUser(userId, state.space);
+}
+
+async function formatMessageWithFooter(sessionId, content, { includeHeader = true } = {}) {
+  try {
+    const headerWrapped = includeHeader ? formatMessageWithLabels(sessionId, content) : content;
+    const footer = await buildSpaceFooterForSession(sessionId);
+    if (footer && footer.length) {
+      return `${headerWrapped}\n\n— Space Context (${getOrInitSessionState(sessionId).space}) —\n${footer}`;
+    }
+    return headerWrapped;
+  } catch {
+    return content;
+  }
+}
+
 // User-level context space for typed flows
 const userContextSpace = new Map(); // userId -> space
 function getOrInitUserSpace(userId) {
@@ -382,6 +468,20 @@ function formatTypedMessageWithLabels(userId, content) {
     const space = getOrInitUserSpace(userId);
     const header = `[${now.toLocaleString()} • Space: ${space}]`;
     return `${header}\n${content}`;
+  } catch {
+    return content;
+  }
+}
+
+async function formatTypedMessageWithLabelsAndFooter(userId, content) {
+  try {
+    const headerWrapped = formatTypedMessageWithLabels(userId, content);
+    const space = getOrInitUserSpace(userId);
+    const footer = await buildSpaceFooterForUser(userId, space);
+    if (footer && footer.length) {
+      return `${headerWrapped}\n\n— Space Context (${space}) —\n${footer}`;
+    }
+    return headerWrapped;
   } catch {
     return content;
   }
@@ -1047,6 +1147,70 @@ if (ENABLE_USER_SYSTEM) {
 
 // --------- OMI linking routes (feature-flagged) ---------
 if (ENABLE_USER_SYSTEM) {
+  // Spaces & Windows management
+  app.get('/spaces', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const currentSpace = getOrInitUserSpace(req.user.id);
+      res.status(200).json({ ok: true, active: currentSpace, spaces: ALLOWED_SPACES });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to read spaces' });
+    }
+  });
+
+  app.post('/spaces/switch', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const { space } = req.body || {};
+      const name = String(space || '').toLowerCase().trim();
+      if (!ALLOWED_SPACES.includes(name)) return res.status(400).json({ error: 'Invalid space' });
+      userContextSpace.set(req.user.id, name);
+      res.status(200).json({ ok: true, active: name });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to switch space' });
+    }
+  });
+
+  app.get('/windows', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const windows = await prisma.userContextWindow.findMany({
+        where: { userId: req.user.id },
+        include: { conversation: { select: { title: true, summary: true, createdAt: true } } },
+        orderBy: { slot: 'asc' }
+      });
+      const present = new Set(windows.map(w => w.slot));
+      const list = [...windows];
+      for (let s = 1; s <= 5; s++) {
+        if (!present.has(s)) list.push({ slot: s, isActive: false, conversationId: '', userId: req.user.id, id: '', createdAt: new Date(), conversation: null });
+      }
+      list.sort((a, b) => a.slot - b.slot);
+      const items = list.map(w => ({ slot: w.slot, isActive: !!w.isActive, title: w.conversation?.title || null, summary: w.conversation?.summary || null }));
+      res.status(200).json({ ok: true, items });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to list windows' });
+    }
+  });
+
+  app.post('/windows/activate', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const { slot } = req.body || {};
+      const s = Number(slot);
+      if (!s || s < 1 || s > 5) return res.status(400).json({ error: 'slot must be 1-5' });
+      let contextWindow = await prisma.userContextWindow.findUnique({ where: { userId_slot: { userId: req.user.id, slot: s } } });
+      if (!contextWindow) {
+        const conversation = await prisma.conversation.create({ data: { userId: req.user.id, openaiConversationId: '' } });
+        contextWindow = await prisma.userContextWindow.create({ data: { userId: req.user.id, slot: s, conversationId: conversation.id, isActive: true } });
+      }
+      await prisma.userContextWindow.updateMany({ where: { userId: req.user.id }, data: { isActive: false } });
+      await prisma.userContextWindow.update({ where: { userId_slot: { userId: req.user.id, slot: s } }, data: { isActive: true } });
+      res.status(200).json({ ok: true, active_slot: s });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to activate window' });
+    }
+  });
+
   // Start linking: generate OTP and send notification
   app.post('/link/omi/start', requireAuth, linkThrottle(5, 60 * 1000), async (req, res) => {
     try {
@@ -1082,7 +1246,7 @@ if (ENABLE_USER_SYSTEM) {
   app.post('/link/omi/confirm', requireAuth, linkThrottle(10, 60 * 1000), async (req, res) => {
     try {
       if (!prisma) return res.status(503).json({ error: 'User system disabled' });
-      const { omi_user_id, code } = req.body || {};
+      const { omi_user_id, code, omi_session_id } = req.body || {};
       const omiUserId = (omi_user_id || '').toString().trim();
       const inputCode = (code || '').toString().trim();
       if (!omiUserId || !inputCode) return res.status(400).json({ error: 'omi_user_id and code are required' });
@@ -1114,6 +1278,20 @@ if (ENABLE_USER_SYSTEM) {
           verificationAttempts: 0
         }
       });
+
+      // Optionally attach an active OMI session id to this user
+      try {
+        const osid = (omi_session_id || '').toString().trim();
+        if (osid) {
+          await prisma.omiSession.upsert({
+            where: { omiSessionId: osid },
+            update: { userId: req.user.id, lastSeenAt: new Date() },
+            create: { omiSessionId: osid, userId: req.user.id }
+          });
+        }
+      } catch (attachErr) {
+        console.warn('Failed to upsert/attach OmiSession on confirm:', attachErr?.message || attachErr);
+      }
 
       res.status(200).json({ ok: true });
     } catch (e) {
@@ -1342,49 +1520,32 @@ app.post('/omi-webhook', async (req, res) => {
       }
     }
     
-    // Context-gated AI activation: only respond to explicit "Hey Omi" variants
-    const transcriptLower = fullTranscript.toLowerCase();
-    const triggerPhrases = [
-      'hey omi', 'hey, omi', 'hey omi,', 'hey, omi,'
-    ];
-    const hasTriggerPhrase = triggerPhrases.some((phrase) => transcriptLower.includes(phrase));
+    // Context-gated AI activation: allow more forgiving triggers anywhere in a segment
+    const activationRegex = /(?:^|\b)(?:\s*(hey|ok|yo|hi|hello)\s*,?\s*)?(omi|jarvis|echo|assistant)\b[,:\-\s]*/i;
+    let activationFoundIndex = -1;
+    let question = '';
+    for (let i = 0; i < sessionSegments.length; i++) {
+      const seg = sessionSegments[i];
+      if (typeof seg.text !== 'string') continue;
+      const match = activationRegex.exec(seg.text);
+      if (match) {
+        activationFoundIndex = i;
+        const startIndex = match.index ?? 0;
+        question = seg.text.substring(startIndex + match[0].length).trim();
+        break;
+      }
+    }
 
-    if (!hasTriggerPhrase) {
+    if (activationFoundIndex === -1) {
       console.log('⏭️ Skipping transcript - explicit trigger not detected');
       return res.status(200).json({});
     }
-    
-         // Extract the question from the accumulated transcript
-     let question = '';
-     
-     if (hasTriggerPhrase) {
-       // If any trigger phrase was used, extract everything after it
-       for (const segment of sessionSegments) {
-         const segmentText = segment.text.toLowerCase();
-         
-         // Find which trigger phrase was used
-         const usedTrigger = triggerPhrases.find(phrase => 
-           segmentText.includes(phrase)
-         );
-         
-         if (usedTrigger) {
-           const patternIndex = segmentText.indexOf(usedTrigger);
-           question = segment.text.substring(patternIndex + usedTrigger.length).trim();
-           break;
-         }
-       }
-       
-       // If no question found after trigger phrase, use remaining segments
-       if (!question) {
-         const triggerIndex = sessionSegments.findIndex(segment => 
-           triggerPhrases.some(phrase => segment.text.toLowerCase().includes(phrase))
-         );
-         if (triggerIndex !== -1) {
-           const remainingSegments = sessionSegments.slice(triggerIndex + 1);
-           question = remainingSegments.map(s => s.text).join(' ').trim();
-         }
-       }
-     }
+
+    // If no question found after trigger phrase, use remaining segments
+    if (!question) {
+      const remainingSegments = sessionSegments.slice(activationFoundIndex + 1);
+      question = remainingSegments.map(s => s.text).join(' ').trim();
+    }
     
     if (!question) {
       console.log('⏭️ Skipping transcript - no question after trigger phrase');
@@ -1416,9 +1577,10 @@ app.post('/omi-webhook', async (req, res) => {
       const menu = [
         '- Say: "Hey Omi, list conversations"',
         '- Say: "Hey Omi, change conversation window"',
-        '- Spaces: todos, memories, tasks, agent, friends, notifications'
+        '- Say: "Hey Omi, list spaces"',
+        '- Say: "Hey Omi, switch to todos space"'
       ].join('\n');
-      const msg = formatMessageWithLabels(session_id, `Menu:\n${menu}`);
+      const msg = await formatMessageWithFooter(session_id, `Menu:\n${menu}`);
       sessionTranscripts.delete(session_id);
       return res.status(200).json({ message: msg });
     }
@@ -1428,13 +1590,14 @@ app.post('/omi-webhook', async (req, res) => {
       const lowerQ = question.toLowerCase();
       if (/\bcancel\b/.test(lowerQ)) {
         state.pending = null;
-        const msg = formatMessageWithLabels(session_id, 'Canceled.');
+        const msg = await formatMessageWithFooter(session_id, 'Canceled.');
         sessionTranscripts.delete(session_id);
         return res.status(200).json({ message: msg });
       }
-      const numMatch = lowerQ.match(/\b(select\s+window\s+|select\s+|window\s+)?([1-5])\b/);
+      const wordToNum = (w) => ({ one:1, two:2, three:3, four:4, five:5 }[w] || NaN);
+      const numMatch = lowerQ.match(/\b(?:select\s+window\s+|select\s+|window\s+)?((?:[1-5])|one|two|three|four|five)\b/);
       if (numMatch) {
-        const chosen = Number(numMatch[2]);
+        const chosen = isNaN(Number(numMatch[1])) ? wordToNum(numMatch[1]) : Number(numMatch[1]);
         try {
           if (ENABLE_USER_SYSTEM && prisma) {
             const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
@@ -1452,7 +1615,7 @@ app.post('/omi-webhook', async (req, res) => {
               const summaryRow = await prisma.conversation.findUnique({ where: { id: contextWindow.conversationId }, select: { title: true, summary: true, createdAt: true } });
               const summaryText = `Switched to window ${chosen}.` + (summaryRow ? ` Title: ${summaryRow.title || 'Untitled'}.` + (summaryRow.summary ? ` ${summaryRow.summary}` : '') : '');
               state.pending = null;
-              const msg = formatMessageWithLabels(session_id, summaryText.trim());
+              const msg = await formatMessageWithFooter(session_id, summaryText.trim());
               sessionTranscripts.delete(session_id);
               return res.status(200).json({ message: msg });
             }
@@ -1461,14 +1624,46 @@ app.post('/omi-webhook', async (req, res) => {
           console.warn('Window switch error:', e?.message || e);
         }
         state.pending = null;
-        const msg = formatMessageWithLabels(session_id, 'Unable to switch window right now.');
+        const msg = await formatMessageWithFooter(session_id, 'Unable to switch window right now.');
         sessionTranscripts.delete(session_id);
         return res.status(200).json({ message: msg });
       }
       // Not recognized; ask again
-      const msg = formatMessageWithLabels(session_id, 'Please say: select window 1-5, or say cancel.');
+      const msg = await formatMessageWithFooter(session_id, 'Please say: select window 1-5, or say cancel.');
       sessionTranscripts.delete(session_id);
       return res.status(200).json({ message: msg });
+    }
+
+    // Intent: list spaces
+    if (/\b(list|show)\s+(spaces)\b/i.test(question)) {
+      const current = getOrInitSessionState(session_id).space;
+      const lines = ALLOWED_SPACES.map((s) => `${s === current ? '[Active] ' : ''}${s}`);
+      const msg = await formatMessageWithFooter(session_id, `Spaces:\n${lines.join('\n')}`);
+      sessionTranscripts.delete(session_id);
+      return res.status(200).json({ message: msg });
+    }
+
+    // Intent: change space
+    {
+      const m = question.toLowerCase().match(/\b(change|switch|set|go)\s+(to\s+)?(default|todos|memories|tasks|agent|friends|notifications)\s*(space)?\b/);
+      if (m) {
+        const desired = m[3];
+        const stateNow = getOrInitSessionState(session_id);
+        stateNow.space = desired;
+        sessionContextState.set(session_id, stateNow);
+        // Attempt to sync with user space if linked
+        try {
+          if (ENABLE_USER_SYSTEM && prisma) {
+            const linkedUserId = await findLinkedUserIdForSession(session_id);
+            if (linkedUserId) {
+              userContextSpace.set(linkedUserId, desired);
+            }
+          }
+        } catch {}
+        const msg = await formatMessageWithFooter(session_id, `Switched to ${desired} space.`);
+        sessionTranscripts.delete(session_id);
+        return res.status(200).json({ message: msg });
+      }
     }
 
     // Intent: list conversations (mapped to context windows)
@@ -1495,7 +1690,7 @@ app.post('/omi-webhook', async (req, res) => {
               const summary = conv.summary ? ` — ${conv.summary}` : '';
               return `${w.slot}) ${flag}${title}${summary}`;
             });
-            const msg = formatMessageWithLabels(session_id, `Conversations:\n${lines.join('\n')}`);
+            const msg = await formatMessageWithFooter(session_id, `Conversations:\n${lines.join('\n')}`);
             sessionTranscripts.delete(session_id);
             return res.status(200).json({ message: msg });
           }
@@ -1503,7 +1698,7 @@ app.post('/omi-webhook', async (req, res) => {
           console.warn('List conversations error:', e?.message || e);
         }
       }
-      const msg = formatMessageWithLabels(session_id, 'No conversations found.');
+      const msg = await formatMessageWithFooter(session_id, 'No conversations found.');
       sessionTranscripts.delete(session_id);
       return res.status(200).json({ message: msg });
     }
@@ -1529,7 +1724,7 @@ app.post('/omi-webhook', async (req, res) => {
             }));
             sessionContextState.set(session_id, { ...state, pending: { type: 'window_switch', options: sorted } });
             const lines = sorted.map(o => `${o.num}) ${(o.title || '<empty>')}${o.summary ? ' — ' + o.summary : ''}`);
-            const msg = formatMessageWithLabels(session_id, `Which conversation window would you like to select?\n${lines.join('\n')}\nSay: select window 1-5, or say cancel.`);
+            const msg = await formatMessageWithFooter(session_id, `Which conversation window would you like to select?\n${lines.join('\n')}\nSay: select window 1-5, or say cancel.`);
             sessionTranscripts.delete(session_id);
             return res.status(200).json({ message: msg });
           }
@@ -1537,7 +1732,7 @@ app.post('/omi-webhook', async (req, res) => {
           console.warn('Change window intent error:', e?.message || e);
         }
       }
-      const msg = formatMessageWithLabels(session_id, 'I could not access your windows.');
+      const msg = await formatMessageWithFooter(session_id, 'I could not access your windows.');
       sessionTranscripts.delete(session_id);
       return res.status(200).json({ message: msg });
     }
@@ -1549,12 +1744,14 @@ app.post('/omi-webhook', async (req, res) => {
     if (/\b(remember|save|note)\b.*\b(memory|fact)\b/i.test(question)) {
       try {
         await omiCreateMemories({ uid, text: question, text_source: 'other' });
+        const msg = await formatMessageWithFooter(session_id, 'Saved to your OMI memories.');
         sessionTranscripts.delete(session_id);
-        return res.status(200).json({ message: "Saved to your OMI memories." });
+        return res.status(200).json({ message: msg });
       } catch (e) {
         console.error('Memory import failed:', e);
+        const msg = await formatMessageWithFooter(session_id, 'I tried to save that as a memory but hit an error.');
         sessionTranscripts.delete(session_id);
-        return res.status(200).json({ message: "I tried to save that as a memory but hit an error." });
+        return res.status(200).json({ message: msg });
       }
     }
 
@@ -1562,12 +1759,14 @@ app.post('/omi-webhook', async (req, res) => {
     if (/\b(log|record|create)\b.*\b(conversation|meeting|call)\b/i.test(question)) {
       try {
         await omiCreateConversation({ uid, text: question, text_source: 'other_text' });
+        const msg = await formatMessageWithFooter(session_id, 'Logged as a conversation in OMI.');
         sessionTranscripts.delete(session_id);
-        return res.status(200).json({ message: "Logged as a conversation in OMI." });
+        return res.status(200).json({ message: msg });
       } catch (e) {
         console.error('Conversation import failed:', e);
+        const msg = await formatMessageWithFooter(session_id, 'I tried to log that conversation but hit an error.');
         sessionTranscripts.delete(session_id);
-        return res.status(200).json({ message: "I tried to log that conversation but hit an error." });
+        return res.status(200).json({ message: msg });
       }
     }
 
@@ -1707,13 +1906,14 @@ app.post('/omi-webhook', async (req, res) => {
             } catch (mErr) {
               console.warn('User message persist error:', mErr?.message || mErr);
             }
-            // Persist assistant response
+            // Persist assistant response (with footer)
             try {
+              const formatted = await formatMessageWithFooter(session_id, aiResponse, { includeHeader: true });
               await prisma.message.create({
                 data: {
                   conversationId: conversationRow.id,
                   role: 'ASSISTANT',
-                  text: aiResponse,
+                  text: formatted,
                   source: 'SYSTEM'
                 }
               });
@@ -1730,7 +1930,8 @@ app.post('/omi-webhook', async (req, res) => {
     // Return response so Omi shows content in chat and sends a single notification
     sessionTranscripts.delete(session_id);
     console.log('🧹 Cleared session transcript for:', session_id);
-    return res.status(200).json({ message: aiResponse });
+    const finalMsg = await formatMessageWithFooter(session_id, aiResponse, { includeHeader: true });
+    return res.status(200).json({ message: finalMsg });
     
   } catch (error) {
     console.error('❌ Error processing webhook:', error);
