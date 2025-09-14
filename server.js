@@ -18,6 +18,16 @@ if (ENABLE_USER_SYSTEM) {
   }
 }
 
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Global middleware (must be registered before routes)
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+if (ENABLE_USER_SYSTEM) {
+  app.use(cookieParser(process.env.SESSION_SECRET || ''));
+}
+
 // --------- Typed messaging + read APIs (feature-flagged) ---------
 if (ENABLE_USER_SYSTEM) {
   // Send a user message; create/use conversation by id or by slot
@@ -236,8 +246,7 @@ if (ENABLE_USER_SYSTEM) {
  * - "keywords", "trigger words", "how to talk to you"
  */
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+// duplicate initialization removed
 
 // Session storage to accumulate transcript segments
 const sessionTranscripts = new Map();
@@ -480,12 +489,7 @@ function getRateLimitStatus(userId) {
 
 // Conversation state is managed via OpenAI Conversations API per session
 
-// Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-if (ENABLE_USER_SYSTEM) {
-  app.use(cookieParser(process.env.SESSION_SECRET || ''));
-}
+// (moved to top) Global middleware
 
 // --------- Auth helpers (feature-flagged) ---------
 function getCookieOptions() {
