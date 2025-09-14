@@ -45,6 +45,10 @@ OPENAI_KEY=
 OMI_APP_ID=your_omi_app_id_here
 OMI_APP_SECRET=your_omi_app_secret_here
 PORT=3000
+# Database (optional; enable user system)
+DATABASE_URL=postgres://user:password@host:5432/dbname
+ENABLE_USER_SYSTEM=true
+SESSION_SECRET=change_me_in_production
 ```
 
 ### 3. Run Locally
@@ -58,6 +62,27 @@ npm start
 ```
 
 The server will start on `http://localhost:3000`
+
+### 4. Database (User System)
+
+If you want users to register, login, manage sessions, and link Omi accounts:
+
+1) Provide a Postgres `DATABASE_URL` and set `ENABLE_USER_SYSTEM=true` in `.env`.
+
+2) Generate and migrate the schema:
+
+```bash
+npm run prisma:generate
+npm run db:dev
+```
+
+3) Start the server. You should see DB health output when enabled.
+
+Endpoints added when `ENABLE_USER_SYSTEM=true`:
+
+- Auth: `POST /auth/register`, `POST /auth/login`, `POST /auth/logout`, `GET /me`
+- Account: `GET /account/profile`, `PATCH /account/profile`, `POST /account/password`, `GET /account/sessions`, `POST /account/sessions/revoke`, `DELETE /account`
+- Omi Linking: `POST /link/omi/start`, `POST /link/omi/confirm`, `GET /link/omi`, `POST /link/omi/resend`, `DELETE /link/omi/:omiUserId`
 
 ### 4. Test the Webhook
 
