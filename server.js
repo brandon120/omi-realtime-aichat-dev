@@ -18,6 +18,196 @@ if (ENABLE_USER_SYSTEM) {
   }
 }
 
+// --------- Typed messaging + read APIs (feature-flagged) ---------
+if (ENABLE_USER_SYSTEM) {
+  // Send a user message; create/use conversation by id or by slot
+  app.post('/messages/send', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const { conversation_id, slot, text } = req.body || {};
+      const messageText = (text || '').toString().trim();
+      if (!messageText) return res.status(400).json({ error: 'text is required' });
+
+      let conversation = null;
+
+      if (conversation_id) {
+        // Ensure the conversation belongs to this user (directly or via linked OMI session)
+        conversation = await prisma.conversation.findFirst({
+          where: {
+            id: String(conversation_id),
+            OR: [
+              { userId: req.user.id },
+              { omiSession: { userId: req.user.id } }
+            ]
+          }
+        });
+        if (!conversation) return res.status(404).json({ error: 'Conversation not found' });
+      } else {
+        const slotNum = Number(slot);
+        if (!slotNum || slotNum < 1 || slotNum > 5) {
+          return res.status(400).json({ error: 'Provide conversation_id or slot (1-5)' });
+        }
+        // Find or create a context window for this slot
+        let context = await prisma.userContextWindow.findUnique({ where: { userId_slot: { userId: req.user.id, slot: slotNum } } });
+        if (!context) {
+          // Create a new conversation for this slot
+          conversation = await prisma.conversation.create({ data: { userId: req.user.id, openaiConversationId: '' } });
+          context = await prisma.userContextWindow.create({ data: { userId: req.user.id, slot: slotNum, conversationId: conversation.id, isActive: true } });
+        } else {
+          conversation = await prisma.conversation.findUnique({ where: { id: context.conversationId } });
+          if (!conversation) {
+            conversation = await prisma.conversation.create({ data: { userId: req.user.id, openaiConversationId: '' } });
+            await prisma.userContextWindow.update({ where: { userId_slot: { userId: req.user.id, slot: slotNum } }, data: { conversationId: conversation.id } });
+          }
+        }
+      }
+
+      // Ensure an OpenAI conversation id exists for typed threads
+      let openaiConvId = conversation.openaiConversationId;
+      if (!openaiConvId) {
+        try {
+          const conv = await openai.conversations.create({ metadata: { typed_user_id: String(req.user.id), source: 'frontend' } });
+          openaiConvId = conv.id;
+          await prisma.conversation.update({ where: { id: conversation.id }, data: { openaiConversationId: openaiConvId } });
+        } catch (e) {
+          console.warn('Failed to create OpenAI conversation for typed flow:', e?.message || e);
+        }
+      }
+
+      // Persist the user message first
+      let userMessageRow = null;
+      try {
+        userMessageRow = await prisma.message.create({
+          data: {
+            conversationId: conversation.id,
+            role: 'USER',
+            text: messageText,
+            source: 'FRONTEND'
+          }
+        });
+      } catch (err) {
+        console.warn('Failed to persist user message:', err?.message || err);
+      }
+
+      // Call OpenAI; prefer Responses API with conversation
+      let assistantText = '';
+      try {
+        const payload = { model: OPENAI_MODEL, input: messageText };
+        if (openaiConvId) payload.conversation = openaiConvId;
+        const response = await openai.responses.create(payload);
+        assistantText = response.output_text;
+      } catch (err) {
+        console.warn('Responses API failed, fallback to chat:', err?.message || err);
+        try {
+          const chat = await openai.chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+              { role: 'system', content: 'You are a helpful assistant.' },
+              { role: 'user', content: messageText }
+            ],
+            max_tokens: 600,
+            temperature: 0.7
+          });
+          assistantText = chat.choices?.[0]?.message?.content || '';
+        } catch (e2) {
+          console.error('Fallback chat failed:', e2);
+          assistantText = "I'm sorry, I'm having trouble responding right now.";
+        }
+      }
+
+      // Persist assistant message
+      try {
+        await prisma.message.create({
+          data: {
+            conversationId: conversation.id,
+            role: 'ASSISTANT',
+            text: assistantText,
+            source: 'SYSTEM'
+          }
+        });
+      } catch (err) {
+        console.warn('Failed to persist assistant message:', err?.message || err);
+      }
+
+      res.status(200).json({ ok: true, conversation_id: conversation.id, assistant_text: assistantText });
+    } catch (e) {
+      console.error('Send message error:', e);
+      res.status(500).json({ error: 'Failed to send message' });
+    }
+  });
+
+  // List conversations for the current user (includes those linked via OMI session)
+  app.get('/conversations', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const limit = Math.min(Number(req.query.limit) || 20, 100);
+      const cursor = req.query.cursor ? new Date(String(req.query.cursor)) : null;
+
+      const where = {
+        OR: [
+          { userId: req.user.id },
+          { omiSession: { userId: req.user.id } }
+        ]
+      };
+      const items = await prisma.conversation.findMany({
+        where: cursor ? { AND: [where, { createdAt: { lt: cursor } }] } : where,
+        orderBy: { createdAt: 'desc' },
+        take: limit + 1,
+        select: { id: true, title: true, summary: true, createdAt: true }
+      });
+      const hasMore = items.length > limit;
+      const page = hasMore ? items.slice(0, limit) : items;
+      const nextCursor = hasMore ? page[page.length - 1].createdAt.toISOString() : null;
+      res.status(200).json({ ok: true, items: page, nextCursor });
+    } catch (e) {
+      console.error('List conversations error:', e);
+      res.status(500).json({ error: 'Failed to list conversations' });
+    }
+  });
+
+  // Get a single conversation (ownership enforced)
+  app.get('/conversations/:id', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const id = String(req.params.id);
+      const convo = await prisma.conversation.findFirst({
+        where: { id, OR: [ { userId: req.user.id }, { omiSession: { userId: req.user.id } } ] },
+        select: { id: true, title: true, summary: true, createdAt: true }
+      });
+      if (!convo) return res.status(404).json({ error: 'Not found' });
+      res.status(200).json({ ok: true, conversation: convo });
+    } catch (e) {
+      console.error('Get conversation error:', e);
+      res.status(500).json({ error: 'Failed to get conversation' });
+    }
+  });
+
+  // List messages in a conversation
+  app.get('/conversations/:id/messages', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const id = String(req.params.id);
+      const owner = await prisma.conversation.findFirst({ where: { id, OR: [ { userId: req.user.id }, { omiSession: { userId: req.user.id } } ] }, select: { id: true } });
+      if (!owner) return res.status(404).json({ error: 'Not found' });
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const cursor = req.query.cursor ? new Date(String(req.query.cursor)) : null;
+      const where = { conversationId: id };
+      const items = await prisma.message.findMany({
+        where: cursor ? { AND: [where, { createdAt: { lt: cursor } }] } : where,
+        orderBy: { createdAt: 'desc' },
+        take: limit + 1,
+        select: { id: true, role: true, text: true, source: true, createdAt: true }
+      });
+      const hasMore = items.length > limit;
+      const page = hasMore ? items.slice(0, limit) : items;
+      const nextCursor = hasMore ? page[page.length - 1].createdAt.toISOString() : null;
+      res.status(200).json({ ok: true, items: page, nextCursor });
+    } catch (e) {
+      console.error('List messages error:', e);
+      res.status(500).json({ error: 'Failed to list messages' });
+    }
+  });
+}
 /**
  * Omi AI Chat Plugin Server
  * 
