@@ -43,3 +43,7 @@ export function View(props: ViewProps) {
 
   return <DefaultView style={[{ backgroundColor }, style]} {...otherProps} />;
 }
+
+// Aliases to support imports as { ThemedView, ThemedText }
+export const ThemedText = Text;
+export const ThemedView = View;
