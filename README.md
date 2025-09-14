@@ -18,6 +18,7 @@ A Node.js backend plugin for Omi that provides real-time AI chat capabilities us
 - OpenAI API key
 - Omi App ID and App Secret
 - Railway account (for deployment)
+- (Optional) PostgreSQL database URL if you enable the DB-backed user system
 
 ## 🛠️ Local Setup
 
@@ -47,7 +48,35 @@ OMI_APP_SECRET=your_omi_app_secret_here
 PORT=3000
 ```
 
-### 3. Run Locally
+### 3. Optional: Enable DB‑backed user system (profiles, sessions, Omi link)
+
+This project ships with an optional user system (email+password, sessions, account management, and Omi linking) controlled by `ENABLE_USER_SYSTEM=true`.
+
+1) Provision Postgres (e.g., Railway Postgres) and copy the connection string to `DATABASE_URL` in `.env`.
+
+2) Set required auth env vars in `.env`:
+
+```env
+ENABLE_USER_SYSTEM=true
+SESSION_SECRET=replace_with_long_random_string
+DATABASE_URL=postgres://user:password@host:5432/dbname
+```
+
+3) Generate the Prisma client and apply migrations:
+
+```bash
+npm run prisma:generate
+# Local/dev:
+npm run prisma:migrate
+# Production/CI:
+npm run prisma:deploy
+```
+
+4) Restart the server.
+
+When enabled, auth uses an HTTP-only cookie named `sid`.
+
+### 4. Run Locally
 
 ```bash
 # Development mode with auto-restart
@@ -59,7 +88,7 @@ npm start
 
 The server will start on `http://localhost:3000`
 
-### 4. Test the Webhook
+### 5. Test the Webhook
 
 You can test the webhook locally using curl or Postman:
 
@@ -176,6 +205,35 @@ The plugin responds with:
 }
 ```
 
+## 👤 Optional User System: Endpoints
+
+Enable with `ENABLE_USER_SYSTEM=true` and a valid `DATABASE_URL`. Cookie-based auth; successful register/login sets `sid`.
+
+- Auth
+  - `POST /auth/register` { email, password, display_name? } → sets session cookie
+  - `POST /auth/login` { email, password } → sets session cookie
+  - `POST /auth/logout` → clears session cookie
+  - `GET /me` → current user and linked Omi IDs
+
+- Account management
+  - `GET /account/profile` → { id, email, displayName, role, createdAt }
+  - `PATCH /account/profile` { display_name?, email?, current_password? }
+    - Email change requires `current_password`
+  - `POST /account/password` { current_password, new_password }
+  - `GET /account/sessions` → list of sessions (masked tokens)
+  - `POST /account/sessions/revoke` { session_token }
+  - `POST /account/sessions/revoke-others`
+  - `DELETE /account` { current_password }
+
+- Omi link management
+  - `POST /link/omi/start` { omi_user_id } → begins verification (OTP)
+  - `POST /link/omi/confirm` { omi_user_id, code } → verify OTP
+  - `GET /link/omi` → list linked IDs
+  - `POST /link/omi/resend` { omi_user_id } → resend new OTP
+  - `DELETE /link/omi/unlink/:omi_user_id` → unlink
+
+All endpoints above require authentication via the session cookie.
+
 ## 📊 Monitoring and Health Checks
 
 ### Health Check Endpoint
@@ -201,10 +259,14 @@ The plugin provides comprehensive logging:
 
 | Variable | Description | Required | Default |
 |----------|-------------|----------|---------|
-| `OPENAI_KEY` | OpenAI API key | Yes | - |
+| `OPENAI_API_KEY` | OpenAI API key (preferred) | Yes | - |
+| `OPENAI_KEY` | OpenAI API key (legacy fallback) | No | - |
 | `OMI_APP_ID` | Omi App ID | Yes | - |
 | `OMI_APP_SECRET` | Omi App Secret | Yes | - |
 | `PORT` | Server port | No | 3000 |
+| `ENABLE_USER_SYSTEM` | Enable DB-backed user system | No | false |
+| `SESSION_SECRET` | Cookie signing secret when user system on | Required if enabled | - |
+| `DATABASE_URL` | Postgres connection string (Prisma) | Required if enabled | - |
 
 ### OpenAI Configuration
 
@@ -255,8 +317,8 @@ npm test
 
 ## 📈 Scaling and Performance
 
-- **Stateless**: No database dependencies
 - **Async Processing**: Non-blocking webhook handling
+- **Optional DB**: User system uses Postgres via Prisma when enabled
 - **Railway Auto-scaling**: Automatically scales based on traffic
 - **Response Time**: Typically 2-5 seconds for full request cycle
 
