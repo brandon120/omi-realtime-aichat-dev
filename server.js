@@ -24,6 +24,26 @@ const PORT = process.env.PORT || 3000;
 // Global middleware (must be registered before routes)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+// CORS (allow Expo/web and configured origins)
+const allowedOrigins = String(process.env.CORS_ORIGINS || 'http://localhost:8081')
+  .split(',')
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && (allowedOrigins.includes('*') || allowedOrigins.includes(origin))) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  // Allow credentials so cookie-based auth works when enabled
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
 if (ENABLE_USER_SYSTEM) {
   app.use(cookieParser(process.env.SESSION_SECRET || ''));
 }
