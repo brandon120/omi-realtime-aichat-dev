@@ -304,24 +304,19 @@ if (ENABLE_USER_SYSTEM) {
 /**
  * Omi AI Chat Plugin Server
  * 
- * TRIGGER PHRASES: Users must start their message with one of these to activate the AI:
+ * TRIGGER PHRASES: Users can start their message with or include one of these to activate the AI:
  * - "Hey Omi" (most common)
  * - "Hey, Omi" (with comma)
  * - "Hey Omi," (with trailing comma)
  * - "Hey, Omi," (with both commas)
- * - "Hey Jarvis" (Iron Man style)
- * - "Hey, Jarvis" (with comma)
- * - "Hey Jarvis," (with trailing comma)
- * - "Hey, Jarvis," (with both commas)
- * - "Hey Echo" (Amazon Alexa style)
- * - "Hey, Echo" (with comma)
- * - "Hey Echo," (with trailing comma)
- * - "Hey, Echo," (with both commas)
+ * - "Omi" (just the name)
+ * - "Assistant" (just the word)
  * - "Hey Assistant" (Google Assistant style)
  * - "Hey, Assistant" (with comma)
  * - "Hey Assistant," (with trailing comma)
  * - "Hey, Assistant," (with both commas)
- * - "hey" (simple trigger)
+ * - "Hey Jarvis" (Iron Man style)
+ * - "Hey Echo" (Amazon Alexa style)
  * 
  * HELP KEYWORDS: Users can ask for help using these words:
  * - "help", "what can you do", "how to use", "instructions", "guide"
@@ -837,7 +832,9 @@ app.get('/health', (req, res) => {
     status: 'OK', 
     message: 'Omi AI Chat Plugin is running',
     trigger_phrases: [
-      'Hey Omi', 'Hey, Omi', 'Hey Omi,', 'Hey, Omi,'
+      'Hey Omi', 'Hey, Omi', 'Hey Omi,', 'Hey, Omi,',
+      'Omi',
+      'Assistant', 'Hey Assistant', 'Hey, Assistant', 'Hey Assistant,', 'Hey, Assistant,'
     ],
     help_keywords: [
       'help', 'what can you do', 'how to use', 'instructions', 'guide',
@@ -878,9 +875,11 @@ app.get('/help', (req, res) => {
     title: 'Omi AI Chat Plugin - How to Use',
     description: 'Learn how to interact with the Omi AI assistant',
     trigger_phrases: {
-      description: 'Start your message with one of these phrases to activate the AI:',
+      description: 'Start your message with or include one of these to activate the AI:',
       phrases: [
-        'Hey Omi', 'Hey, Omi', 'Hey Omi,', 'Hey, Omi,'
+        'Hey Omi', 'Hey, Omi', 'Hey Omi,', 'Hey, Omi,',
+        'Omi',
+        'Assistant', 'Hey Assistant', 'Hey, Assistant', 'Hey Assistant,', 'Hey, Assistant,'
       ]
     },
     examples: [
@@ -899,7 +898,7 @@ app.get('/help', (req, res) => {
         'keywords', 'trigger words', 'how to talk to you'
       ]
     },
-    note: 'The AI will only respond when you use the "Hey Omi" trigger phrases.',
+    note: 'The AI will only respond when you use a trigger such as "Hey Omi", "Omi", or "Assistant".',
     features: {
       web_search: 'Built-in web search for current information',
       natural_language: 'Understands natural conversation patterns',
