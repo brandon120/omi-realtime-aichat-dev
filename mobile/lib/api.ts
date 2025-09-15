@@ -83,6 +83,65 @@ export async function apiMe(): Promise<{ user: User; omi_links: Array<{ omiUserI
   return null;
 }
 
+// Account management
+export async function apiUpdateProfile(params: { display_name?: string; email?: string; current_password?: string }): Promise<{ user: User } | null> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.patch('/account/profile', params);
+    if (data && data.ok) return { user: data.user };
+  } catch {}
+  return null;
+}
+
+export async function apiChangePassword(current_password: string, new_password: string): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.post('/account/password', { current_password, new_password });
+    return !!(data && data.ok);
+  } catch {
+    return false;
+  }
+}
+
+export async function apiListSessions(): Promise<Array<{ session_token_masked: string; createdAt: string; expiresAt: string; is_current: boolean }>> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.get('/account/sessions');
+    if (data && data.ok) return data.sessions || [];
+  } catch {}
+  return [];
+}
+
+export async function apiRevokeSession(session_token: string): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.post('/account/sessions/revoke', { session_token });
+    return !!(data && data.ok);
+  } catch {
+    return false;
+  }
+}
+
+export async function apiRevokeOtherSessions(): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.post('/account/sessions/revoke-others', {});
+    return !!(data && data.ok);
+  } catch {
+    return false;
+  }
+}
+
+export async function apiDeleteAccount(current_password: string): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.delete('/account', { data: { current_password } as any });
+    return !!(data && data.ok);
+  } catch {
+    return false;
+  }
+}
+
 export async function apiStartOmiLink(omi_user_id: string): Promise<{ dev_code?: string } | null> {
   const client = createApiClient();
   const { data } = await client.post('/link/omi/start', { omi_user_id });
