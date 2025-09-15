@@ -2,10 +2,11 @@ import React, { useState } from 'react';
 import { StyleSheet, View, TextInput, Button, Alert } from 'react-native';
 import { ThemedView, ThemedText } from '@/components/Themed';
 import { useAuth } from '@/contexts/AuthContext';
-import { Redirect, Link } from 'expo-router';
+import { Redirect, Link, useRouter } from 'expo-router';
 
 export default function SignInScreen() {
   const { status, login } = useAuth();
+  const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -17,7 +18,12 @@ export default function SignInScreen() {
     setLoading(true);
     const ok = await login(email, password);
     setLoading(false);
-    if (!ok) Alert.alert('Sign in failed');
+    if (!ok) {
+      Alert.alert('Sign in failed');
+      return;
+    }
+    // Ensure immediate navigation to the authenticated tabs
+    router.replace('/(tabs)');
   }
 
   return (
