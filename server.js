@@ -333,6 +333,54 @@ const sessionConversations = new Map();
 // Last processed question per session to prevent duplicate triggers
 const lastProcessedQuestion = new Map();
 
+// Track activation detection per session to delay processing until end-of-utterance
+const sessionActivationState = new Map(); // sessionId -> { detectedAt:number, index:number }
+// Maximum time to wait (ms) after detecting a trigger before considering the utterance complete
+const MAX_UTTERANCE_WAIT_MS = Number(process.env.MAX_UTTERANCE_WAIT_MS || 2000);
+
+function clearTranscriptAndActivation(sessionId) {
+  try { sessionTranscripts.delete(sessionId); } catch {}
+  try { sessionActivationState.delete(sessionId); } catch {}
+}
+
+function buildQuestionCandidate(segments, activationIndex, activationMatch, activationRegex) {
+  if (activationIndex < 0 || activationIndex >= segments.length) return '';
+  const parts = [];
+  for (let i = activationIndex; i < segments.length; i++) {
+    const seg = segments[i];
+    if (typeof seg.text !== 'string') continue;
+    if (i === activationIndex) {
+      // Use the matched trigger to slice the leading invocation phrase
+      if (activationMatch && typeof activationMatch.index === 'number') {
+        const startIndex = activationMatch.index + activationMatch[0].length;
+        parts.push(seg.text.substring(startIndex));
+      } else {
+        // Fallback: remove the trigger phrase using regex again
+        const m = activationRegex.exec(seg.text);
+        if (m && typeof m.index === 'number') {
+          parts.push(seg.text.substring(m.index + m[0].length));
+        } else {
+          parts.push(seg.text);
+        }
+      }
+    } else {
+      parts.push(seg.text);
+    }
+  }
+  return parts.join(' ').trim();
+}
+
+function isUtteranceProbablyComplete(text) {
+  if (!text) return false;
+  // Clear end punctuation or explicit closing phrases
+  if (/[\.!?…]\s*$/.test(text)) return true;
+  if (/\b(thanks|thank you|that'?s all|done|over)\b[\.!?]?\s*$/i.test(text)) return true;
+  // Questions sometimes include '?' mid-sentence in interim transcripts; prefer end marker.
+  // As a safety, treat long utterances as complete to avoid stalling.
+  if (text.length >= 180) return true;
+  return false;
+}
+
 // Context/state per Omi session
 // space: default | todos | memories | tasks | agent | friends | notifications
 // pending: { type: 'window_switch', options: Array<{num:number, slot:number, conversationId?:string, title?:string|null, summary?:string|null, createdAt?:string}> } | { type: 'space_switch' } | null
@@ -1570,7 +1618,7 @@ app.post('/omi-webhook', async (req, res) => {
           });
           if (link) {
             if (link.verificationAttempts >= MAX_OTP_ATTEMPTS) {
-              sessionTranscripts.delete(session_id);
+              clearTranscriptAndActivation(session_id);
               return res.status(200).json({ message: 'Too many attempts. Please request a new code.' });
             }
             // Mark verified
@@ -1594,7 +1642,7 @@ app.post('/omi-webhook', async (req, res) => {
             } catch (attachErr) {
               console.warn('Failed to upsert/attach OmiSession:', attachErr?.message || attachErr);
             }
-            sessionTranscripts.delete(session_id);
+            clearTranscriptAndActivation(session_id);
             return res.status(200).json({ message: 'Verification successful. Your account is now linked.' });
           } else {
             // Increment attempts for any active links to gently rate-limit guessing (best-effort)
@@ -1604,7 +1652,7 @@ app.post('/omi-webhook', async (req, res) => {
                 data: { verificationAttempts: { increment: 1 } }
               });
             } catch {}
-            sessionTranscripts.delete(session_id);
+            clearTranscriptAndActivation(session_id);
             return res.status(200).json({ message: 'That code was not recognized. Please try again.' });
           }
         }
@@ -1617,15 +1665,14 @@ app.post('/omi-webhook', async (req, res) => {
     // Context-gated AI activation: allow more forgiving triggers anywhere in a segment
     const activationRegex = /(?:^|\b)(?:\s*(hey|ok|yo|hi|hello)\s*,?\s*)?(omi|jarvis|echo|assistant)\b[,:\-\s]*/i;
     let activationFoundIndex = -1;
-    let question = '';
+    let activationMatch = null;
     for (let i = 0; i < sessionSegments.length; i++) {
       const seg = sessionSegments[i];
       if (typeof seg.text !== 'string') continue;
       const match = activationRegex.exec(seg.text);
       if (match) {
         activationFoundIndex = i;
-        const startIndex = match.index ?? 0;
-        question = seg.text.substring(startIndex + match[0].length).trim();
+        activationMatch = match;
         break;
       }
     }
@@ -1635,14 +1682,31 @@ app.post('/omi-webhook', async (req, res) => {
       return res.status(200).json({});
     }
 
-    // If no question found after trigger phrase, use remaining segments
-    if (!question) {
-      const remainingSegments = sessionSegments.slice(activationFoundIndex + 1);
-      question = remainingSegments.map(s => s.text).join(' ').trim();
+    // Track first time we detected activation and build a rolling candidate until utterance is complete
+    const existingActivation = sessionActivationState.get(session_id);
+    const nowTs = Date.now();
+    if (!existingActivation) {
+      sessionActivationState.set(session_id, { detectedAt: nowTs, index: activationFoundIndex });
+    } else if (typeof existingActivation.index === 'number') {
+      existingActivation.index = Math.min(existingActivation.index, activationFoundIndex);
+      // Preserve original detectedAt to allow full wait window
+      sessionActivationState.set(session_id, existingActivation);
     }
+
+    const activationState = sessionActivationState.get(session_id);
+    const candidate = buildQuestionCandidate(sessionSegments, activationState.index, activationMatch, activationRegex);
+
+    const utteranceComplete = isUtteranceProbablyComplete(candidate) || (nowTs - activationState.detectedAt) >= MAX_UTTERANCE_WAIT_MS;
+    if (!utteranceComplete) {
+      console.log('⏳ Holding for end-of-utterance before responding...');
+      return res.status(200).json({});
+    }
+
+    let question = candidate.trim();
     
     if (!question) {
       console.log('⏭️ Skipping transcript - no question after trigger phrase');
+      clearTranscriptAndActivation(session_id);
       return res.status(200).json({ 
         message: 'Transcript ignored - no question provided' 
       });
@@ -1675,7 +1739,7 @@ app.post('/omi-webhook', async (req, res) => {
         '- Say: "Hey Omi, switch to todos space"'
       ].join('\n');
       const msg = await formatMessageWithFooter(session_id, `Menu:\n${menu}`);
-      sessionTranscripts.delete(session_id);
+      clearTranscriptAndActivation(session_id);
       return res.status(200).json({ message: msg });
     }
 
@@ -1685,7 +1749,7 @@ app.post('/omi-webhook', async (req, res) => {
       if (/\bcancel\b/.test(lowerQ)) {
         state.pending = null;
         const msg = await formatMessageWithFooter(session_id, 'Canceled.');
-        sessionTranscripts.delete(session_id);
+        clearTranscriptAndActivation(session_id);
         return res.status(200).json({ message: msg });
       }
       const wordToNum = (w) => ({ one:1, two:2, three:3, four:4, five:5 }[w] || NaN);
@@ -1710,7 +1774,7 @@ app.post('/omi-webhook', async (req, res) => {
               const summaryText = `Switched to window ${chosen}.` + (summaryRow ? ` Title: ${summaryRow.title || 'Untitled'}.` + (summaryRow.summary ? ` ${summaryRow.summary}` : '') : '');
               state.pending = null;
               const msg = await formatMessageWithFooter(session_id, summaryText.trim());
-              sessionTranscripts.delete(session_id);
+              clearTranscriptAndActivation(session_id);
               return res.status(200).json({ message: msg });
             }
           }
@@ -1719,12 +1783,12 @@ app.post('/omi-webhook', async (req, res) => {
         }
         state.pending = null;
         const msg = await formatMessageWithFooter(session_id, 'Unable to switch window right now.');
-        sessionTranscripts.delete(session_id);
+        clearTranscriptAndActivation(session_id);
         return res.status(200).json({ message: msg });
       }
       // Not recognized; ask again
       const msg = await formatMessageWithFooter(session_id, 'Please say: select window 1-5, or say cancel.');
-      sessionTranscripts.delete(session_id);
+      clearTranscriptAndActivation(session_id);
       return res.status(200).json({ message: msg });
     }
 
@@ -1733,7 +1797,7 @@ app.post('/omi-webhook', async (req, res) => {
       const current = getOrInitSessionState(session_id).space;
       const lines = ALLOWED_SPACES.map((s) => `${s === current ? '[Active] ' : ''}${s}`);
       const msg = await formatMessageWithFooter(session_id, `Spaces:\n${lines.join('\n')}`);
-      sessionTranscripts.delete(session_id);
+      clearTranscriptAndActivation(session_id);
       return res.status(200).json({ message: msg });
     }
 
@@ -1755,7 +1819,7 @@ app.post('/omi-webhook', async (req, res) => {
           }
         } catch {}
         const msg = await formatMessageWithFooter(session_id, `Switched to ${desired} space.`);
-        sessionTranscripts.delete(session_id);
+        clearTranscriptAndActivation(session_id);
         return res.status(200).json({ message: msg });
       }
     }
@@ -1785,7 +1849,7 @@ app.post('/omi-webhook', async (req, res) => {
               return `${w.slot}) ${flag}${title}${summary}`;
             });
             const msg = await formatMessageWithFooter(session_id, `Conversations:\n${lines.join('\n')}`);
-            sessionTranscripts.delete(session_id);
+            clearTranscriptAndActivation(session_id);
             return res.status(200).json({ message: msg });
           }
         } catch (e) {
@@ -1793,7 +1857,7 @@ app.post('/omi-webhook', async (req, res) => {
         }
       }
       const msg = await formatMessageWithFooter(session_id, 'No conversations found.');
-      sessionTranscripts.delete(session_id);
+      clearTranscriptAndActivation(session_id);
       return res.status(200).json({ message: msg });
     }
 
@@ -1816,7 +1880,7 @@ app.post('/omi-webhook', async (req, res) => {
               const summaryRow = await prisma.conversation.findUnique({ where: { id: contextWindow.conversationId }, select: { title: true, summary: true } });
               const summaryText = `Switched to window ${chosen}.` + (summaryRow ? ` Title: ${summaryRow.title || 'Untitled'}.` + (summaryRow.summary ? ` ${summaryRow.summary}` : '') : '');
               const msg = await formatMessageWithFooter(session_id, summaryText.trim());
-              sessionTranscripts.delete(session_id);
+              clearTranscriptAndActivation(session_id);
               return res.status(200).json({ message: msg });
             }
           }
@@ -1824,7 +1888,7 @@ app.post('/omi-webhook', async (req, res) => {
           console.warn('Direct window selection error:', e?.message || e);
         }
         const msg = await formatMessageWithFooter(session_id, 'Unable to switch window right now.');
-        sessionTranscripts.delete(session_id);
+        clearTranscriptAndActivation(session_id);
         return res.status(200).json({ message: msg });
       }
     }
@@ -1851,7 +1915,7 @@ app.post('/omi-webhook', async (req, res) => {
             sessionContextState.set(session_id, { ...state, pending: { type: 'window_switch', options: sorted } });
             const lines = sorted.map(o => `${o.num}) ${(o.title || '<empty>')}${o.summary ? ' — ' + o.summary : ''}`);
             const msg = await formatMessageWithFooter(session_id, `Which conversation window would you like to select?\n${lines.join('\n')}\nSay: select window 1-5, or say cancel.`);
-            sessionTranscripts.delete(session_id);
+            clearTranscriptAndActivation(session_id);
             return res.status(200).json({ message: msg });
           }
         } catch (e) {
@@ -1859,7 +1923,7 @@ app.post('/omi-webhook', async (req, res) => {
         }
       }
       const msg = await formatMessageWithFooter(session_id, 'I could not access your windows.');
-      sessionTranscripts.delete(session_id);
+      clearTranscriptAndActivation(session_id);
       return res.status(200).json({ message: msg });
     }
     
@@ -1892,7 +1956,7 @@ app.post('/omi-webhook', async (req, res) => {
         console.warn('Remote OMI memory import failed:', e?.message || e);
       }
       const msg = await formatMessageWithFooter(session_id, localSaved || remoteSaved ? 'Saved to your memories.' : 'I tried to save that as a memory but hit an error.');
-      sessionTranscripts.delete(session_id);
+      clearTranscriptAndActivation(session_id);
       return res.status(200).json({ message: msg });
     }
 
@@ -1911,7 +1975,7 @@ app.post('/omi-webhook', async (req, res) => {
         }
       }
       const msg = await formatMessageWithFooter(session_id, saved ? 'Task added.' : 'I tried to add that task but hit an error.');
-      sessionTranscripts.delete(session_id);
+      clearTranscriptAndActivation(session_id);
       return res.status(200).json({ message: msg });
     }
 
@@ -1924,7 +1988,7 @@ app.post('/omi-webhook', async (req, res) => {
             const events = await prisma.agentEvent.findMany({ where: { userId: linkedUserId }, orderBy: { createdAt: 'desc' }, take: 5 });
             const lines = events.map((e, i) => `${i + 1}. ${e.type}${e.payload ? ' — ' + JSON.stringify(e.payload).slice(0, 80) : ''}`);
             const msg = await formatMessageWithFooter(session_id, lines.length ? `Your recent tasks:\n${lines.join('\n')}` : 'No tasks yet.');
-            sessionTranscripts.delete(session_id);
+            clearTranscriptAndActivation(session_id);
             return res.status(200).json({ message: msg });
           }
         } catch (e) {
@@ -1932,7 +1996,7 @@ app.post('/omi-webhook', async (req, res) => {
         }
       }
       const msg = await formatMessageWithFooter(session_id, 'I could not access your tasks.');
-      sessionTranscripts.delete(session_id);
+      clearTranscriptAndActivation(session_id);
       return res.status(200).json({ message: msg });
     }
 
@@ -1945,7 +2009,7 @@ app.post('/omi-webhook', async (req, res) => {
             const memories = await prisma.memory.findMany({ where: { userId: linkedUserId }, orderBy: { createdAt: 'desc' }, take: 5 });
             const lines = memories.map((m, i) => `${i + 1}. ${m.text}`);
             const msg = await formatMessageWithFooter(session_id, lines.length ? `Your recent memories:\n${lines.join('\n')}` : 'No memories yet.');
-            sessionTranscripts.delete(session_id);
+            clearTranscriptAndActivation(session_id);
             return res.status(200).json({ message: msg });
           }
         } catch (e) {
@@ -1953,7 +2017,7 @@ app.post('/omi-webhook', async (req, res) => {
         }
       }
       const msg = await formatMessageWithFooter(session_id, 'I could not access your memories.');
-      sessionTranscripts.delete(session_id);
+      clearTranscriptAndActivation(session_id);
       return res.status(200).json({ message: msg });
     }
 
@@ -1966,7 +2030,7 @@ app.post('/omi-webhook', async (req, res) => {
             const events = await prisma.notificationEvent.findMany({ where: { userId: linkedUserId }, orderBy: { createdAt: 'desc' }, take: 5 });
             const lines = events.map((e, i) => `${i + 1}. [${e.channel}] ${e.message} — ${e.status}`);
             const msg = await formatMessageWithFooter(session_id, lines.length ? `Your recent notifications:\n${lines.join('\n')}` : 'No notifications.');
-            sessionTranscripts.delete(session_id);
+            clearTranscriptAndActivation(session_id);
             return res.status(200).json({ message: msg });
           }
         } catch (e) {
@@ -1974,7 +2038,7 @@ app.post('/omi-webhook', async (req, res) => {
         }
       }
       const msg = await formatMessageWithFooter(session_id, 'I could not access your notifications.');
-      sessionTranscripts.delete(session_id);
+      clearTranscriptAndActivation(session_id);
       return res.status(200).json({ message: msg });
     }
 
@@ -1983,12 +2047,12 @@ app.post('/omi-webhook', async (req, res) => {
       try {
         await omiCreateConversation({ uid, text: question, text_source: 'other_text' });
         const msg = await formatMessageWithFooter(session_id, 'Logged as a conversation in OMI.');
-        sessionTranscripts.delete(session_id);
+        clearTranscriptAndActivation(session_id);
         return res.status(200).json({ message: msg });
       } catch (e) {
         console.error('Conversation import failed:', e);
         const msg = await formatMessageWithFooter(session_id, 'I tried to log that conversation but hit an error.');
-        sessionTranscripts.delete(session_id);
+        clearTranscriptAndActivation(session_id);
         return res.status(200).json({ message: msg });
       }
     }
@@ -2151,8 +2215,8 @@ app.post('/omi-webhook', async (req, res) => {
     }
 
     // Return response so Omi shows content in chat and sends a single notification
-    sessionTranscripts.delete(session_id);
-    console.log('🧹 Cleared session transcript for:', session_id);
+    clearTranscriptAndActivation(session_id);
+    console.log('🧹 Cleared session state for:', session_id);
     const finalMsg = await formatMessageWithFooter(session_id, aiResponse, { includeHeader: true });
     return res.status(200).json({ message: finalMsg });
     
@@ -2244,8 +2308,8 @@ app.listen(PORT, async () => {
        });
        
        if (hasOldSegment) {
-         sessionTranscripts.delete(sessionId);
-         console.log('�� Cleaned up old session:', sessionId);
+         clearTranscriptAndActivation(sessionId);
+         console.log('🧹 Cleaned up old session:', sessionId);
        }
      }
    }, 5 * 60 * 1000); // 5 minutes
