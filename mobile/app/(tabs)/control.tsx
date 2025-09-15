@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, View, Text, TouchableOpacity, TextInput, FlatList, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
+import { DrawerLayoutAndroid, useWindowDimensions } from 'react-native';
 import { ThemedView } from '@/components/Themed';
 import { useAuth } from '@/contexts/AuthContext';
 import {
@@ -12,9 +13,11 @@ import {
   apiCreateMemory,
   apiCreateTask,
   apiMe,
+  apiGetConversation,
   type ConversationItem,
   type MessageItem
 } from '@/lib/api';
+import { apiListWindows } from '@/lib/api';
 
 type ConversationState = {
   items: ConversationItem[];
@@ -35,6 +38,11 @@ export default function ChatScreen() {
   const [sending, setSending] = useState<boolean>(false);
   const pollingRef = useRef<any>(null);
   const [hasOmiLink, setHasOmiLink] = useState<boolean>(true);
+  const drawerRef = useRef<DrawerLayoutAndroid>(null);
+  const { width } = useWindowDimensions();
+  const isWide = width >= 900;
+  const [showOverlayList, setShowOverlayList] = useState<boolean>(false);
+  const convosPollRef = useRef<any>(null);
 
   const selectedMessages = useMemo(() => {
     if (!selectedId) return [] as MessageItem[];
@@ -45,8 +53,27 @@ export default function ChatScreen() {
   async function loadConversations() {
     setConvos((prev: ConversationState) => ({ ...prev, loading: true }));
     const res = await apiListConversations(20);
-    setConvos({ items: res.items, nextCursor: res.nextCursor, loading: false });
-    if (!selectedId && res.items.length > 0) setSelectedId(res.items[0].id);
+    let items = res.items;
+    // Prefer currently active window's conversation if present
+    try {
+      const windows = await apiListWindows();
+      const active = windows.find((w: any) => w.isActive && w.conversationId);
+      const activeId = active?.conversationId || null;
+      if (activeId && items.some((i) => i.id === activeId)) {
+        setSelectedId(activeId);
+      } else if (!selectedId && items.length > 0) {
+        setSelectedId(items[0].id);
+      }
+      if (activeId && !items.some((i) => i.id === activeId)) {
+        try {
+          const c = await apiGetConversation(activeId);
+          if (c) items = [c, ...items];
+        } catch {}
+      }
+    } catch {
+      if (!selectedId && res.items.length > 0) setSelectedId(res.items[0].id);
+    }
+    setConvos({ items, nextCursor: res.nextCursor, loading: false });
   }
 
   async function loadMessages(conversationId: string) {
@@ -72,6 +99,9 @@ export default function ChatScreen() {
       const verified = (me?.omi_links || []).some((l: any) => l.isVerified);
       setHasOmiLink(!!verified);
     })();
+    if (convosPollRef.current) clearInterval(convosPollRef.current);
+    convosPollRef.current = setInterval(loadConversations, 5000);
+    return () => { if (convosPollRef.current) clearInterval(convosPollRef.current); };
   }, []);
 
   useEffect(() => {
@@ -176,23 +206,152 @@ export default function ChatScreen() {
 
   const selectedLoading = selectedId ? messages.byConversationId[selectedId]?.loading : false;
 
+  const drawerContent = (
+    <View style={{ flex: 1, padding: 12 }}>
+      <View style={styles.sidebarHeader}>
+        <Text style={{ fontSize: 20, fontWeight: '800' }}>Conversations</Text>
+      </View>
+      {convos.loading ? <ActivityIndicator /> : (
+        <FlatList<ConversationItem>
+          data={convos.items}
+          renderItem={renderConversation}
+          keyExtractor={(c: ConversationItem) => c.id}
+        />
+      )}
+    </View>
+  );
+
+  if (isWide) {
+    // Desktop/tablet layout with static sidebar
+    return (
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <ThemedView style={styles.container}>
+          <View style={styles.sidebar}>
+            <View style={styles.sidebarHeader}>
+              <Text style={{ fontSize: 22, fontWeight: '800' }}>Chat</Text>
+            </View>
+            {convos.loading ? <ActivityIndicator /> : (
+              <FlatList<ConversationItem>
+                data={convos.items}
+                renderItem={renderConversation}
+                keyExtractor={(c: ConversationItem) => c.id}
+              />
+            )}
+          </View>
+          <View style={styles.chatArea}>
+            {!hasOmiLink ? (
+              <View style={styles.banner}>
+                <Text style={styles.bannerText}>Tip: Link your OMI account in Settings to receive live notifications.</Text>
+              </View>
+            ) : null}
+            {!selectedId ? (
+              <View style={styles.emptyState}>
+                <Text>Select a conversation</Text>
+              </View>
+            ) : (
+              <>
+                <FlatList<MessageItem>
+                  style={styles.messageList}
+                  contentContainerStyle={{ padding: 12 }}
+                  data={selectedMessages}
+                  renderItem={renderMessage}
+                  keyExtractor={(m: MessageItem) => m.id}
+                />
+                <View style={styles.inputRow}>
+                  <TextInput
+                    style={styles.textInput}
+                    placeholder="Type a message or /notify ..."
+                    value={input}
+                    onChangeText={setInput}
+                    multiline
+                  />
+                  <TouchableOpacity style={styles.sendBtn} onPress={onSend} disabled={sending || !input.trim()}>
+                    <Text style={styles.sendBtnText}>{sending ? '...' : 'Send'}</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
+          </View>
+        </ThemedView>
+      </KeyboardAvoidingView>
+    );
+  }
+
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <ThemedView style={styles.container}>
-        <View style={styles.sidebar}>
-          <View style={styles.sidebarHeader}>
-            <Text style={{ fontSize: 22, fontWeight: '800' }}>Chat</Text>
+      {Platform.OS === 'android' ? (
+        <DrawerLayoutAndroid
+          ref={drawerRef}
+          drawerWidth={260}
+          drawerPosition="left"
+          renderNavigationView={() => drawerContent}
+        >
+          <ThemedView style={styles.containerMobile}>
+            <View style={styles.headerBar}>
+              <TouchableOpacity onPress={() => drawerRef.current?.openDrawer()} style={styles.hamburger}>
+                <Text style={styles.hamburgerText}>☰</Text>
+              </TouchableOpacity>
+              <Text style={styles.headerTitle}>Chat</Text>
+            </View>
+            {!hasOmiLink ? (
+              <View style={styles.banner}>
+                <Text style={styles.bannerText}>Tip: Link your OMI account in Settings to receive live notifications.</Text>
+              </View>
+            ) : null}
+            {!selectedId ? (
+              <View style={styles.emptyState}>
+                <Text>Select a conversation</Text>
+              </View>
+            ) : (
+              <>
+                <FlatList<MessageItem>
+                  style={styles.messageList}
+                  contentContainerStyle={{ padding: 12 }}
+                  data={selectedMessages}
+                  renderItem={renderMessage}
+                  keyExtractor={(m: MessageItem) => m.id}
+                />
+                <View style={styles.inputRow}>
+                  <TextInput
+                    style={styles.textInput}
+                    placeholder="Type a message or /notify ..."
+                    value={input}
+                    onChangeText={setInput}
+                    multiline
+                  />
+                  <TouchableOpacity style={styles.sendBtn} onPress={onSend} disabled={sending || !input.trim()}>
+                    <Text style={styles.sendBtnText}>{sending ? '...' : 'Send'}</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
+          </ThemedView>
+        </DrawerLayoutAndroid>
+      ) : (
+        <ThemedView style={styles.containerMobile}>
+          <View style={styles.headerBar}>
+            <TouchableOpacity onPress={() => setShowOverlayList((v)=>!v)} style={styles.hamburger}>
+              <Text style={styles.hamburgerText}>☰</Text>
+            </TouchableOpacity>
+            <Text style={styles.headerTitle}>Chat</Text>
           </View>
-          {convos.loading ? <ActivityIndicator /> : (
-            <FlatList<ConversationItem>
-              data={convos.items}
-              renderItem={renderConversation}
-              keyExtractor={(c: ConversationItem) => c.id}
-            />
-          )}
-        </View>
-
-        <View style={styles.chatArea}>
+          {showOverlayList ? (
+            <View style={styles.overlayList}>
+              <View style={styles.overlayHeader}><Text style={{ fontWeight: '800' }}>Conversations</Text></View>
+              {convos.loading ? <ActivityIndicator /> : (
+                <FlatList<ConversationItem>
+                  data={convos.items}
+                  renderItem={({ item }: { item: ConversationItem }) => (
+                    <TouchableOpacity style={[styles.conversationItem, item.id === selectedId && styles.conversationItemActive]} onPress={() => { setSelectedId(item.id); setShowOverlayList(false); }}>
+                      <Text style={styles.conversationTitle}>{item.title || 'Untitled'}</Text>
+                      {item.summary ? <Text style={styles.conversationSummary} numberOfLines={1}>{item.summary}</Text> : null}
+                    </TouchableOpacity>
+                  )}
+                  keyExtractor={(c: ConversationItem) => c.id}
+                />
+              )}
+            </View>
+          ) : null}
           {!hasOmiLink ? (
             <View style={styles.banner}>
               <Text style={styles.bannerText}>Tip: Link your OMI account in Settings to receive live notifications.</Text>
@@ -225,14 +384,15 @@ export default function ChatScreen() {
               </View>
             </>
           )}
-        </View>
-      </ThemedView>
+        </ThemedView>
+      )}
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, flexDirection: 'row' },
+  containerMobile: { flex: 1 },
   sidebar: { width: 240, borderRightWidth: 1, borderRightColor: '#eee', padding: 12, gap: 12 },
   sidebarHeader: { paddingBottom: 8 },
   conversationItem: { paddingVertical: 10, paddingHorizontal: 8, borderRadius: 8 },
@@ -240,6 +400,12 @@ const styles = StyleSheet.create({
   conversationTitle: { fontWeight: '700' },
   conversationSummary: { color: '#666' },
   chatArea: { flex: 1, paddingTop: 12 },
+  headerBar: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: '#eee' },
+  hamburger: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 6, borderWidth: 1, borderColor: '#ddd', backgroundColor: '#fff' },
+  hamburgerText: { fontSize: 18 },
+  headerTitle: { fontSize: 20, fontWeight: '800', marginLeft: 12 },
+  overlayList: { position: 'absolute', left: 12, top: 56, bottom: 12, width: 280, backgroundColor: '#fff', borderWidth: 1, borderColor: '#eee', borderRadius: 12, padding: 8, zIndex: 20 },
+  overlayHeader: { paddingVertical: 6, paddingHorizontal: 6, borderBottomWidth: 1, borderBottomColor: '#eee', marginBottom: 6 },
   banner: { marginHorizontal: 12, marginBottom: 8, padding: 10, backgroundColor: '#fff7e6', borderColor: '#ffd591', borderWidth: 1, borderRadius: 8 },
   bannerText: { color: '#8c6d1f' },
   emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center' },

@@ -53,8 +53,8 @@ export default function TabOneScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 16, gap: 16 },
-  row: { flexDirection: 'row', gap: 12 },
-  rowSingle: { flexDirection: 'row', gap: 12 },
+  row: { flexDirection: 'row', gap: 12, flexWrap: 'wrap' },
+  rowSingle: { flexDirection: 'row', gap: 12, flexWrap: 'wrap' },
   section: { gap: 8 },
   headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
 });
@@ -71,7 +71,7 @@ function Card({ title, description, href }: { title: string; description: string
 }
 
 const cardStyles = StyleSheet.create({
-  card: { flex: 1, padding: 16, borderWidth: 1, borderColor: '#ddd', backgroundColor: '#fff', borderRadius: 12, minHeight: 100 },
+  card: { flexGrow: 1, flexBasis: '48%', padding: 16, borderWidth: 1, borderColor: '#ddd', backgroundColor: '#fff', borderRadius: 12, minHeight: 100 },
   title: { fontWeight: '700', fontSize: 16, marginBottom: 6 },
   desc: { color: '#666' },
 });
