@@ -57,13 +57,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const res = await apiLogin({ email, password });
       if (!res) return false;
-      const me = await apiMe();
-      if (me && me.user) {
-        setUser(me.user);
-        setStatus('authenticated');
-        return true;
-      }
-      return false;
+      // Immediately authenticate using response data for snappy UX
+      setUser(res.user);
+      setStatus('authenticated');
+      // Background refresh to sync server-side user state
+      (async () => {
+        try {
+          const me = await apiMe();
+          if (me && me.user) setUser(me.user);
+        } catch {}
+      })();
+      return true;
     } catch (e: any) {
       Alert.alert('Login failed', e?.message || 'Please try again.');
       return false;
@@ -74,13 +78,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const res = await apiRegister({ email, password, display_name: displayName });
       if (!res) return false;
-      const me = await apiMe();
-      if (me && me.user) {
-        setUser(me.user);
-        setStatus('authenticated');
-        return true;
-      }
-      return false;
+      // Immediately authenticate using response data
+      setUser(res.user);
+      setStatus('authenticated');
+      // Background refresh
+      (async () => {
+        try {
+          const me = await apiMe();
+          if (me && me.user) setUser(me.user);
+        } catch {}
+      })();
+      return true;
     } catch (e: any) {
       Alert.alert('Registration failed', e?.message || 'Please try again.');
       return false;
