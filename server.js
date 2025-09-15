@@ -334,12 +334,21 @@ const sessionConversations = new Map();
 const lastProcessedQuestion = new Map();
 
 // Track activation detection per session to delay processing until end-of-utterance
-const sessionActivationState = new Map(); // sessionId -> { detectedAt:number, index:number }
-// Maximum time to wait (ms) after detecting a trigger before considering the utterance complete
-const MAX_UTTERANCE_WAIT_MS = Number(process.env.MAX_UTTERANCE_WAIT_MS || 2000);
+const sessionActivationState = new Map(); // sessionId -> { detectedAt:number, index:number, remainderSegments?:Array<object> }
+// Follow-up behavior: wait for next "Omi" or timeout
+const FOLLOWUP_WAIT_MS = Number(process.env.FOLLOWUP_WAIT_MS || 5000);
+const FOLLOWUP_WORD_REGEX = /\bomi\b/i;
 
 function clearTranscriptAndActivation(sessionId) {
-  try { sessionTranscripts.delete(sessionId); } catch {}
+  try {
+    const activation = sessionActivationState.get(sessionId);
+    const remainder = activation && activation.remainderSegments;
+    if (remainder && Array.isArray(remainder) && remainder.length > 0) {
+      sessionTranscripts.set(sessionId, remainder);
+    } else {
+      sessionTranscripts.delete(sessionId);
+    }
+  } catch {}
   try { sessionActivationState.delete(sessionId); } catch {}
 }
 
@@ -371,14 +380,87 @@ function buildQuestionCandidate(segments, activationIndex, activationMatch, acti
 }
 
 function isUtteranceProbablyComplete(text) {
+  // Retained for potential future use; unused under follow-up gating
   if (!text) return false;
-  // Clear end punctuation or explicit closing phrases
   if (/[\.!?…]\s*$/.test(text)) return true;
   if (/\b(thanks|thank you|that'?s all|done|over)\b[\.!?]?\s*$/i.test(text)) return true;
-  // Questions sometimes include '?' mid-sentence in interim transcripts; prefer end marker.
-  // As a safety, treat long utterances as complete to avoid stalling.
   if (text.length >= 180) return true;
   return false;
+}
+
+function findNextOmiBoundaryAfter(segments, startIndex, startOffsetInFirstSegment) {
+  for (let i = startIndex; i < segments.length; i++) {
+    const seg = segments[i];
+    if (typeof seg.text !== 'string') continue;
+    const text = seg.text;
+    const searchStart = i === startIndex ? (startOffsetInFirstSegment || 0) : 0;
+    if (searchStart >= text.length) continue;
+    const relativePos = text.slice(searchStart).search(FOLLOWUP_WORD_REGEX);
+    if (relativePos !== -1) {
+      return { index: i, pos: searchStart + relativePos };
+    }
+  }
+  return null;
+}
+
+function buildCandidateAndRemainder(segments, activationIndex, activationMatch, activationRegex, boundary) {
+  const before = [];
+  let remainder = null;
+  if (activationIndex < 0 || activationIndex >= segments.length) return { candidate: '', remainder };
+
+  const firstSeg = segments[activationIndex];
+  const startOffset = (activationMatch && typeof activationMatch.index === 'number') ? (activationMatch.index + activationMatch[0].length) : 0;
+
+  if (boundary) {
+    for (let i = activationIndex; i <= boundary.index; i++) {
+      const seg = segments[i];
+      if (typeof seg.text !== 'string') continue;
+      if (i === activationIndex && i === boundary.index) {
+        // Both activation and boundary in same segment
+        const pre = seg.text.substring(startOffset, boundary.pos);
+        if (pre && pre.length) before.push(pre);
+      } else if (i === activationIndex) {
+        const pre = seg.text.substring(startOffset);
+        if (pre && pre.length) before.push(pre);
+      } else if (i < boundary.index) {
+        before.push(seg.text);
+      } else if (i === boundary.index) {
+        const pre = seg.text.substring(0, boundary.pos);
+        if (pre && pre.length) before.push(pre);
+      }
+    }
+    // Build remainder starting at boundary
+    const remainderList = [];
+    for (let i = boundary.index; i < segments.length; i++) {
+      const seg = segments[i];
+      if (typeof seg.text !== 'string') {
+        remainderList.push(seg);
+        continue;
+      }
+      if (i === boundary.index) {
+        const tail = seg.text.substring(boundary.pos);
+        remainderList.push({ ...seg, text: tail });
+      } else {
+        remainderList.push(seg);
+      }
+    }
+    remainder = remainderList;
+  } else {
+    // No boundary: candidate is everything after activation
+    for (let i = activationIndex; i < segments.length; i++) {
+      const seg = segments[i];
+      if (typeof seg.text !== 'string') continue;
+      if (i === activationIndex) {
+        const pre = seg.text.substring(startOffset);
+        if (pre && pre.length) before.push(pre);
+      } else {
+        before.push(seg.text);
+      }
+    }
+  }
+
+  const candidate = before.join(' ').trim();
+  return { candidate, remainder };
 }
 
 // Context/state per Omi session
@@ -1694,12 +1776,23 @@ app.post('/omi-webhook', async (req, res) => {
     }
 
     const activationState = sessionActivationState.get(session_id);
-    const candidate = buildQuestionCandidate(sessionSegments, activationState.index, activationMatch, activationRegex);
+    const startOffset = (activationMatch && typeof activationMatch.index === 'number') ? (activationMatch.index + activationMatch[0].length) : 0;
+    const boundary = findNextOmiBoundaryAfter(sessionSegments, activationState.index, startOffset);
+    const { candidate, remainder } = buildCandidateAndRemainder(sessionSegments, activationState.index, activationMatch, activationRegex, boundary);
 
-    const utteranceComplete = isUtteranceProbablyComplete(candidate) || (nowTs - activationState.detectedAt) >= MAX_UTTERANCE_WAIT_MS;
-    if (!utteranceComplete) {
-      console.log('⏳ Holding for end-of-utterance before responding...');
-      return res.status(200).json({});
+    // If we found a boundary, we can proceed immediately and keep the remainder as the next transcript baseline.
+    // Otherwise, wait up to FOLLOWUP_WAIT_MS for a possible follow-up "Omi".
+    if (!boundary) {
+      const waitedMs = nowTs - activationState.detectedAt;
+      if (waitedMs < FOLLOWUP_WAIT_MS) {
+        console.log('⏳ Waiting for potential follow-up "Omi" before responding...');
+        return res.status(200).json({});
+      }
+    }
+
+    if (remainder) {
+      const existing = sessionActivationState.get(session_id) || {};
+      sessionActivationState.set(session_id, { ...existing, remainderSegments: remainder });
     }
 
     let question = candidate.trim();
