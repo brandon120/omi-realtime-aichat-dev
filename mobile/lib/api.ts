@@ -203,6 +203,56 @@ export async function apiConfirmOmiLink(omi_user_id: string, code: string): Prom
   return !!(data && data.ok);
 }
 
+// Conversations & Messages
+export type ConversationItem = { id: string; title?: string | null; summary?: string | null; createdAt: string };
+export type MessageItem = { id: string; role: 'USER' | 'ASSISTANT' | 'SYSTEM' | 'TOOL'; text: string; source: string; createdAt: string };
+
+export async function apiListConversations(limit: number = 20, cursor?: string): Promise<{ items: ConversationItem[]; nextCursor: string | null }> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.get('/conversations', { params: { limit, ...(cursor ? { cursor } : {}) } });
+    if (data && data.ok) return { items: data.items as ConversationItem[], nextCursor: data.nextCursor || null };
+  } catch {}
+  return { items: [], nextCursor: null };
+}
+
+export async function apiGetConversation(id: string): Promise<ConversationItem | null> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.get(`/conversations/${encodeURIComponent(id)}`);
+    if (data && data.ok) return data.conversation as ConversationItem;
+  } catch {}
+  return null;
+}
+
+export async function apiListMessages(conversationId: string, limit: number = 50, cursor?: string): Promise<{ items: MessageItem[]; nextCursor: string | null }> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.get(`/conversations/${encodeURIComponent(conversationId)}/messages`, { params: { limit, ...(cursor ? { cursor } : {}) } });
+    if (data && data.ok) return { items: data.items as MessageItem[], nextCursor: data.nextCursor || null };
+  } catch {}
+  return { items: [], nextCursor: null };
+}
+
+export async function apiSendMessage(params: { conversation_id?: string; slot?: number; text: string }): Promise<{ ok: boolean; conversation_id: string; assistant_text: string } | null> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.post('/messages/send', params);
+    if (data && typeof data.ok !== 'undefined') return data;
+  } catch {}
+  return null;
+}
+
+export async function apiCreateFollowup(params: { conversation_id?: string; message: string }): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.post('/followups', params);
+    return !!(data && data.ok);
+  } catch {
+    return false;
+  }
+}
+
 // Spaces & Windows
 export async function apiGetSpaces(): Promise<{ active: string; spaces: string[] } | null> {
   const client = createApiClient();

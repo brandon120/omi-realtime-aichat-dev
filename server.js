@@ -194,6 +194,39 @@ if (ENABLE_USER_SYSTEM) {
       }
 
       const responseText = await formatTypedMessageWithLabelsAndFooter(req.user.id, assistantText);
+
+      // Send OMI notification with the assistant answer (best-effort)
+      try {
+        // Persist notification event
+        const event = await prisma.notificationEvent.create({
+          data: { userId: req.user.id, channel: 'OMI', message: responseText, status: 'queued' }
+        });
+        let delivered = false;
+        let errorMessage = null;
+        try {
+          const links = await prisma.omiUserLink.findMany({ where: { userId: req.user.id, isVerified: true }, select: { omiUserId: true } });
+          if (links.length > 0) {
+            for (const link of links) {
+              try {
+                await sendOmiNotification(link.omiUserId, responseText);
+                delivered = true;
+                break;
+              } catch (e) {
+                errorMessage = e?.message || String(e);
+              }
+            }
+          } else {
+            errorMessage = 'No verified OMI link';
+          }
+        } catch (e) {
+          errorMessage = e?.message || String(e);
+        }
+        try {
+          await prisma.notificationEvent.update({ where: { id: event.id }, data: { status: delivered ? 'sent' : 'error', error: delivered ? null : errorMessage } });
+        } catch {}
+      } catch (notifyErr) {
+        console.warn('Failed to queue/send OMI notification for typed message:', notifyErr?.message || notifyErr);
+      }
       res.status(200).json({ ok: true, conversation_id: conversation.id, assistant_text: responseText });
     } catch (e) {
       console.error('Send message error:', e);
