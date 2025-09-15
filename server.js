@@ -338,6 +338,8 @@ const sessionActivationState = new Map(); // sessionId -> { detectedAt:number, i
 // Follow-up behavior: wait for next "Omi" or timeout
 const FOLLOWUP_WAIT_MS = Number(process.env.FOLLOWUP_WAIT_MS || 5000);
 const FOLLOWUP_WORD_REGEX = /\bomi\b/i;
+const sessionFollowupHold = new Map(); // sessionId -> { startedAt:number, lastActivityAt:number }
+const sessionFollowupTimers = new Map(); // sessionId -> Timeout
 
 function clearTranscriptAndActivation(sessionId) {
   try {
@@ -350,6 +352,50 @@ function clearTranscriptAndActivation(sessionId) {
     }
   } catch {}
   try { sessionActivationState.delete(sessionId); } catch {}
+}
+
+function clearFollowupHold(sessionId) {
+  try {
+    const t = sessionFollowupTimers.get(sessionId);
+    if (t) {
+      clearTimeout(t);
+      sessionFollowupTimers.delete(sessionId);
+    }
+  } catch {}
+  try { sessionFollowupHold.delete(sessionId); } catch {}
+}
+
+function startFollowupHold(sessionId) {
+  clearFollowupHold(sessionId);
+  const now = Date.now();
+  sessionFollowupHold.set(sessionId, { startedAt: now, lastActivityAt: now });
+  const timer = setTimeout(() => {
+    try { sessionTranscripts.delete(sessionId); } catch {}
+    clearFollowupHold(sessionId);
+  }, FOLLOWUP_WAIT_MS);
+  sessionFollowupTimers.set(sessionId, timer);
+}
+
+function refreshFollowupHold(sessionId) {
+  if (!sessionFollowupHold.has(sessionId)) return;
+  const now = Date.now();
+  try {
+    const existing = sessionFollowupHold.get(sessionId) || { startedAt: now, lastActivityAt: now };
+    sessionFollowupHold.set(sessionId, { ...existing, lastActivityAt: now });
+  } catch {}
+  try {
+    const t = sessionFollowupTimers.get(sessionId);
+    if (t) clearTimeout(t);
+  } catch {}
+  const timer = setTimeout(() => {
+    try { sessionTranscripts.delete(sessionId); } catch {}
+    clearFollowupHold(sessionId);
+  }, FOLLOWUP_WAIT_MS);
+  sessionFollowupTimers.set(sessionId, timer);
+}
+
+function isInFollowupHold(sessionId) {
+  return sessionFollowupHold.has(sessionId);
 }
 
 function buildQuestionCandidate(segments, activationIndex, activationMatch, activationRegex) {
@@ -1760,6 +1806,11 @@ app.post('/omi-webhook', async (req, res) => {
     }
 
     if (activationFoundIndex === -1) {
+      // If we are currently holding for follow-up but user hasn't said Omi again, keep buffering until timeout.
+      if (isInFollowupHold(session_id)) {
+        refreshFollowupHold(session_id);
+        return res.status(200).json({});
+      }
       console.log('⏭️ Skipping transcript - explicit trigger not detected');
       return res.status(200).json({});
     }
@@ -2309,6 +2360,8 @@ app.post('/omi-webhook', async (req, res) => {
 
     // Return response so Omi shows content in chat and sends a single notification
     clearTranscriptAndActivation(session_id);
+    // Enter follow-up hold: keep collecting until next "Omi" or 5s of inactivity
+    startFollowupHold(session_id);
     console.log('🧹 Cleared session state for:', session_id);
     const finalMsg = await formatMessageWithFooter(session_id, aiResponse, { includeHeader: true });
     return res.status(200).json({ message: finalMsg });
