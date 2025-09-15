@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { StyleSheet, View, Text, Button, Alert, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { StyleSheet, View, Text, Button, Alert, TouchableOpacity, ActivityIndicator, ScrollView } from 'react-native';
 import { ThemedView, ThemedText } from '@/components/Themed';
 import { apiGetSpaces, apiSwitchSpace, apiListWindows, apiActivateWindow } from '@/lib/api';
 
@@ -46,27 +46,29 @@ export default function SpacesScreen() {
 
   return (
     <ThemedView style={styles.container}>
-      <View style={styles.headerRow}>
-        <ThemedText type="title">Spaces</ThemedText>
-        <Button title="Refresh" onPress={refresh} />
-      </View>
-      {loading ? <ActivityIndicator /> : null}
-      <View style={styles.badgeRow}>
-        {spaces.map((s: string) => (
-          <TouchableOpacity key={s} style={[styles.badge, activeSpace === s && styles.badgeActive]} onPress={() => onSwitchSpace(s)}>
-            <Text style={[styles.badgeText, activeSpace === s && styles.badgeTextActive]}>{s}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-      <View style={styles.section}>
-        <ThemedText type="subtitle">Conversation Windows</ThemedText>
-        {windows.map((w: { slot: number; isActive: boolean; title?: string | null; summary?: string | null }) => (
-          <TouchableOpacity key={w.slot} style={[styles.windowItem, w.isActive && styles.windowItemActive]} onPress={() => onActivateWindow(w.slot)}>
-            <Text style={styles.windowTitle}>{w.slot}) {w.title || '<empty>'}</Text>
-            {w.summary ? <Text style={styles.windowSummary}>{w.summary}</Text> : null}
-          </TouchableOpacity>
-        ))}
-      </View>
+      <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+        <View style={styles.headerRow}>
+          <ThemedText type="title">Spaces</ThemedText>
+          <Button title="Refresh" onPress={refresh} />
+        </View>
+        {loading ? <ActivityIndicator /> : null}
+        <View style={styles.badgeRow}>
+          {spaces.map((s: string) => (
+            <TouchableOpacity key={s} style={[styles.badge, activeSpace === s && styles.badgeActive]} onPress={() => onSwitchSpace(s)}>
+              <Text style={[styles.badgeText, activeSpace === s && styles.badgeTextActive]}>{s}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        <View style={styles.section}>
+          <ThemedText type="subtitle">Conversation Windows</ThemedText>
+          {windows.map((w: { slot: number; isActive: boolean; title?: string | null; summary?: string | null }) => (
+            <TouchableOpacity key={w.slot} style={[styles.windowItem, w.isActive && styles.windowItemActive]} onPress={() => onActivateWindow(w.slot)}>
+              <Text style={styles.windowTitle}>{w.slot}) {w.title || '<empty>'}</Text>
+              {w.summary ? <Text style={styles.windowSummary}>{w.summary}</Text> : null}
+            </TouchableOpacity>
+          ))}
+        </View>
+      </ScrollView>
     </ThemedView>
   );
 }

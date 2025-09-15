@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { StyleSheet, View, Text, Button, TextInput, Alert } from 'react-native';
+import { StyleSheet, View, Text, Button, TextInput, Alert, ScrollView } from 'react-native';
 import { ThemedView, ThemedText } from '@/components/Themed';
 import { createApiClient } from '@/lib/api';
 
@@ -23,18 +23,20 @@ export default function ControlScreen() {
 
   return (
     <ThemedView style={styles.container}>
-      <ThemedText type="title">Control</ThemedText>
-      <View style={styles.row}>
-        <Text>Slot (1-5)</Text>
-        <TextInput style={styles.input} value={slot} onChangeText={setSlot} keyboardType="number-pad" />
-      </View>
-      <View style={styles.row}>
-        <Text>Message</Text>
-        <TextInput style={[styles.input, { height: 80 }]} value={text} onChangeText={setText} multiline placeholder="Type a message to the assistant" />
-      </View>
-      <Button title="Send" onPress={send} />
-      <ThemedText type="subtitle">Assistant Response</ThemedText>
-      <Text selectable>{response}</Text>
+      <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+        <ThemedText type="title">Control</ThemedText>
+        <View style={styles.row}>
+          <Text>Slot (1-5)</Text>
+          <TextInput style={styles.input} value={slot} onChangeText={setSlot} keyboardType="number-pad" />
+        </View>
+        <View style={styles.row}>
+          <Text>Message</Text>
+          <TextInput style={[styles.input, { height: 80 }]} value={text} onChangeText={setText} multiline placeholder="Type a message to the assistant" />
+        </View>
+        <Button title="Send" onPress={send} />
+        <ThemedText type="subtitle">Assistant Response</ThemedText>
+        <Text selectable>{response}</Text>
+      </ScrollView>
     </ThemedView>
   );
 }
