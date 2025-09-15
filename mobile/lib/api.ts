@@ -1,25 +1,73 @@
 import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
 import * as SecureStore from 'expo-secure-store';
+import { Platform } from 'react-native';
 import { getApiBaseUrl } from '@/constants/Config';
 
 const SID_KEY = 'sid_token';
 
-export async function saveSessionToken(token: string): Promise<void> {
-  await SecureStore.setItemAsync(SID_KEY, token);
+function webLocalStorageGet(key: string): string | null {
+  try {
+    if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+      return window.localStorage.getItem(key);
+    }
+  } catch {}
+  return null;
 }
 
-export async function getSessionToken(): Promise<string | null> {
+function webLocalStorageSet(key: string, value: string): void {
   try {
-    return await SecureStore.getItemAsync(SID_KEY);
+    if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(key, value);
+    }
+  } catch {}
+}
+
+function webLocalStorageRemove(key: string): void {
+  try {
+    if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.removeItem(key);
+    }
+  } catch {}
+}
+
+export async function saveSessionToken(token: string): Promise<void> {
+  // Use localStorage on web, SecureStore on native
+  if (Platform.OS === 'web') {
+    webLocalStorageSet(SID_KEY, token);
+    return;
+  }
+  try {
+    await SecureStore.setItemAsync(SID_KEY, token);
   } catch {
-    return null;
+    // Best-effort fallback
+    webLocalStorageSet(SID_KEY, token);
   }
 }
 
+export async function getSessionToken(): Promise<string | null> {
+  // Prefer web storage on web
+  if (Platform.OS === 'web') {
+    const fromWeb = webLocalStorageGet(SID_KEY);
+    if (fromWeb) return fromWeb;
+  }
+  try {
+    const val = await SecureStore.getItemAsync(SID_KEY);
+    if (val) return val;
+  } catch {}
+  // Fallback to web storage in case SecureStore is unavailable
+  return webLocalStorageGet(SID_KEY);
+}
+
 export async function clearSessionToken(): Promise<void> {
+  if (Platform.OS === 'web') {
+    webLocalStorageRemove(SID_KEY);
+    return;
+  }
   try {
     await SecureStore.deleteItemAsync(SID_KEY);
   } catch {}
+  // Also clear web storage just in case
+  webLocalStorageRemove(SID_KEY);
 }
 
 export function createApiClient(): AxiosInstance {

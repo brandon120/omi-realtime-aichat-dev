@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { StyleSheet, View, Text, Button, ActivityIndicator, TouchableOpacity } from 'react-native';
+import { StyleSheet, View, Text, Button, ActivityIndicator, TouchableOpacity, ScrollView } from 'react-native';
 import { ThemedView, ThemedText } from '@/components/Themed';
 import { apiMe } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -24,27 +24,29 @@ export default function TabOneScreen() {
 
   return (
     <ThemedView style={styles.container}>
-      <ThemedText type="title">Dashboard</ThemedText>
-      <ThemedText>Welcome{user?.displayName ? `, ${user.displayName}` : ''}!</ThemedText>
-      <View style={styles.row}>
-        <Card title="Spaces" href="/(tabs)/spaces" description="Switch spaces and windows" />
-        <Card title="Tasks" href="/(tabs)/tasks" description="Create and view tasks" />
-      </View>
-      <View style={styles.row}>
-        <Card title="Memories" href="/(tabs)/memories" description="Save and browse memories" />
-        <Card title="Control" href="/(tabs)/control" description="Send messages to assistant" />
-      </View>
-      <View style={styles.rowSingle}>
-        <Card title="Settings" href="/(tabs)/settings" description="Manage Omi link and account" />
-      </View>
-      <View style={styles.section}>
-        <View style={styles.headerRow}>
-          <ThemedText type="subtitle">Profile</ThemedText>
-          <Button title={loading ? 'Loading…' : 'Refresh'} onPress={refresh} />
+      <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+        <ThemedText type="title">Dashboard</ThemedText>
+        <ThemedText>Welcome{user?.displayName ? `, ${user.displayName}` : ''}!</ThemedText>
+        <View style={styles.row}>
+          <Card title="Spaces" href="/(tabs)/spaces" description="Switch spaces and windows" />
+          <Card title="Tasks" href="/(tabs)/tasks" description="Create and view tasks" />
         </View>
-        {status === 'loading' || loading ? <ActivityIndicator /> : null}
-        <Text selectable>{JSON.stringify(me?.user || user, null, 2)}</Text>
-      </View>
+        <View style={styles.row}>
+          <Card title="Memories" href="/(tabs)/memories" description="Save and browse memories" />
+          <Card title="Control" href="/(tabs)/control" description="Send messages to assistant" />
+        </View>
+        <View style={styles.rowSingle}>
+          <Card title="Settings" href="/(tabs)/settings" description="Manage Omi link and account" />
+        </View>
+        <View style={styles.section}>
+          <View style={styles.headerRow}>
+            <ThemedText type="subtitle">Profile</ThemedText>
+            <Button title={loading ? 'Loading…' : 'Refresh'} onPress={refresh} />
+          </View>
+          {status === 'loading' || loading ? <ActivityIndicator /> : null}
+          <Text selectable>{JSON.stringify(me?.user || user, null, 2)}</Text>
+        </View>
+      </ScrollView>
     </ThemedView>
   );
 }
