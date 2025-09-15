@@ -68,6 +68,8 @@ export default function SpacesScreen() {
             </TouchableOpacity>
           ))}
         </View>
+        <View style={{ height: 8 }} />
+        <ThemedText>Tip: Tap a space to switch app behavior for notifications and context. Tap a window to make it active for typed chat.</ThemedText>
       </ScrollView>
     </ThemedView>
   );

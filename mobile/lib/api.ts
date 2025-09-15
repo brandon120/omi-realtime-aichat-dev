@@ -273,7 +273,7 @@ export async function apiSwitchSpace(space: string): Promise<boolean> {
   }
 }
 
-export async function apiListWindows(): Promise<Array<{ slot: number; isActive: boolean; title?: string | null; summary?: string | null }>> {
+export async function apiListWindows(): Promise<Array<{ slot: number; isActive: boolean; conversationId?: string | null; title?: string | null; summary?: string | null }>> {
   const client = createApiClient();
   try {
     const { data } = await client.get('/windows');
@@ -313,6 +313,16 @@ export async function apiCreateMemory(text: string): Promise<boolean> {
   }
 }
 
+export async function apiDeleteMemory(id: string): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.delete(`/memories/${encodeURIComponent(id)}`);
+    return !!(data && data.ok);
+  } catch {
+    return false;
+  }
+}
+
 // Agent events (tasks)
 export type AgentEventItem = { id: string; type: string; payload?: any; createdAt: string };
 export async function apiListAgentEvents(limit: number = 50, cursor?: string): Promise<{ items: AgentEventItem[]; nextCursor: string | null }> {
@@ -328,6 +338,16 @@ export async function apiCreateTask(text: string): Promise<boolean> {
   const client = createApiClient();
   try {
     const { data } = await client.post('/agent-events', { type: 'task_created', payload: { text } });
+    return !!(data && data.ok);
+  } catch {
+    return false;
+  }
+}
+
+export async function apiCompleteTask(id: string): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.patch(`/agent-events/${encodeURIComponent(id)}/complete`, {});
     return !!(data && data.ok);
   } catch {
     return false;

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { StyleSheet, View, Text, Button, TextInput, Alert, ScrollView } from 'react-native';
+import { StyleSheet, View, Text, Button, TextInput, Alert, ScrollView, TouchableOpacity } from 'react-native';
 import { ThemedView, ThemedText } from '@/components/Themed';
 import { apiMe, apiStartOmiLink, apiConfirmOmiLink } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -46,22 +46,28 @@ export default function SettingsScreen() {
     <ThemedView style={styles.container}>
       <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
         <ThemedText type="title">Settings</ThemedText>
-        <Button title="Sign out" onPress={logout} />
-        <Button title="Refresh Profile" onPress={refreshProfile} />
-        <Text selectable>{JSON.stringify(me, null, 2)}</Text>
+        <View style={styles.rowButtons}>
+          <TouchableOpacity style={styles.primaryBtn} onPress={refreshProfile}><Text style={styles.btnText}>Refresh Profile</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.dangerBtn} onPress={logout}><Text style={styles.btnText}>Sign out</Text></TouchableOpacity>
+        </View>
+        {me ? (
+          <View style={styles.card}>
+            <Text selectable>{JSON.stringify(me, null, 2)}</Text>
+          </View>
+        ) : null}
         <View style={{ height: 16 }} />
         <ThemedText type="subtitle">Link Omi Account</ThemedText>
         <View style={styles.row}>
           <Text>Omi User ID</Text>
           <TextInput style={styles.input} value={omiUserId} onChangeText={setOmiUserId} placeholder="omi_user_id" />
         </View>
-        <Button title="Start Linking" onPress={startLink} />
-        {devCode ? <Text selectable>Dev Code: {devCode}</Text> : null}
+        <TouchableOpacity style={styles.primaryBtn} onPress={startLink}><Text style={styles.btnText}>Start Linking</Text></TouchableOpacity>
+        {devCode ? <Text selectable style={{ marginTop: 6 }}>Dev Code: {devCode}</Text> : null}
         <View style={styles.row}>
           <Text>Verification Code</Text>
           <TextInput style={styles.input} value={code} onChangeText={setCode} placeholder="123456" />
         </View>
-        <Button title="Confirm Code" onPress={confirmLink} />
+        <TouchableOpacity style={styles.successBtn} onPress={confirmLink}><Text style={styles.btnText}>Confirm Code</Text></TouchableOpacity>
       </ScrollView>
     </ThemedView>
   );
@@ -77,5 +83,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
   },
+  rowButtons: { flexDirection: 'row', gap: 8 },
+  primaryBtn: { backgroundColor: '#2f95dc', paddingHorizontal: 16, paddingVertical: 12, borderRadius: 8 },
+  successBtn: { backgroundColor: '#28a745', paddingHorizontal: 16, paddingVertical: 12, borderRadius: 8 },
+  dangerBtn: { backgroundColor: '#dc3545', paddingHorizontal: 16, paddingVertical: 12, borderRadius: 8 },
+  btnText: { color: '#fff', fontWeight: '700' },
+  card: { borderWidth: 1, borderColor: '#eee', backgroundColor: '#fff', borderRadius: 8, padding: 12 },
 });
 
