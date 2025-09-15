@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
-import { StyleSheet, View, Text, Button, TextInput, Alert } from 'react-native';
+import { StyleSheet, View, Text, Button, TextInput, Alert, ScrollView } from 'react-native';
 import { ThemedView, ThemedText } from '@/components/Themed';
 import { apiMe, apiStartOmiLink, apiConfirmOmiLink } from '@/lib/api';
+import { useAuth } from '@/contexts/AuthContext';
 
 export default function SettingsScreen() {
+  const { logout } = useAuth();
   const [omiUserId, setOmiUserId] = useState<string>('');
   const [code, setCode] = useState<string>('');
   const [me, setMe] = useState<any>(null);
@@ -42,22 +44,25 @@ export default function SettingsScreen() {
 
   return (
     <ThemedView style={styles.container}>
-      <ThemedText type="title">Settings</ThemedText>
-      <Button title="Refresh Profile" onPress={refreshProfile} />
-      <Text selectable>{JSON.stringify(me, null, 2)}</Text>
-      <View style={{ height: 16 }} />
-      <ThemedText type="subtitle">Link Omi Account</ThemedText>
-      <View style={styles.row}>
-        <Text>Omi User ID</Text>
-        <TextInput style={styles.input} value={omiUserId} onChangeText={setOmiUserId} placeholder="omi_user_id" />
-      </View>
-      <Button title="Start Linking" onPress={startLink} />
-      {devCode ? <Text selectable>Dev Code: {devCode}</Text> : null}
-      <View style={styles.row}>
-        <Text>Verification Code</Text>
-        <TextInput style={styles.input} value={code} onChangeText={setCode} placeholder="123456" />
-      </View>
-      <Button title="Confirm Code" onPress={confirmLink} />
+      <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+        <ThemedText type="title">Settings</ThemedText>
+        <Button title="Sign out" onPress={logout} />
+        <Button title="Refresh Profile" onPress={refreshProfile} />
+        <Text selectable>{JSON.stringify(me, null, 2)}</Text>
+        <View style={{ height: 16 }} />
+        <ThemedText type="subtitle">Link Omi Account</ThemedText>
+        <View style={styles.row}>
+          <Text>Omi User ID</Text>
+          <TextInput style={styles.input} value={omiUserId} onChangeText={setOmiUserId} placeholder="omi_user_id" />
+        </View>
+        <Button title="Start Linking" onPress={startLink} />
+        {devCode ? <Text selectable>Dev Code: {devCode}</Text> : null}
+        <View style={styles.row}>
+          <Text>Verification Code</Text>
+          <TextInput style={styles.input} value={code} onChangeText={setCode} placeholder="123456" />
+        </View>
+        <Button title="Confirm Code" onPress={confirmLink} />
+      </ScrollView>
     </ThemedView>
   );
 }
