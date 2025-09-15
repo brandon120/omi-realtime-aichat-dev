@@ -2,10 +2,11 @@ import React, { useState } from 'react';
 import { StyleSheet, View, TextInput, Button, Alert } from 'react-native';
 import { ThemedView, ThemedText } from '@/components/Themed';
 import { useAuth } from '@/contexts/AuthContext';
-import { Redirect, Link } from 'expo-router';
+import { Redirect, Link, useRouter } from 'expo-router';
 
 export default function SignUpScreen() {
   const { status, register } = useAuth();
+  const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -18,7 +19,12 @@ export default function SignUpScreen() {
     setLoading(true);
     const ok = await register(email, password, displayName || undefined);
     setLoading(false);
-    if (!ok) Alert.alert('Sign up failed');
+    if (!ok) {
+      Alert.alert('Sign up failed');
+      return;
+    }
+    // Ensure immediate navigation to the authenticated tabs
+    router.replace('/(tabs)');
   }
 
   return (

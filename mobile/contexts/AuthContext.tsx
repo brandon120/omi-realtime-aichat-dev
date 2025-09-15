@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import { router } from 'expo-router';
 import { Alert } from 'react-native';
 import {
   apiLogin,
@@ -104,6 +105,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {}
     setUser(null);
     setStatus('unauthenticated');
+    // Navigate to auth stack after logout
+    try { router.replace('/(auth)'); } catch {}
   }
 
   async function refresh(): Promise<void> {
