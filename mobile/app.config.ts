@@ -6,6 +6,7 @@ const config: ExpoConfig = {
   name: 'Omi Mobile',
   slug: 'omi-mobile',
   scheme: 'omiapp',
+  icon: './assets/images/icon.png',
   splash: {
     image: './assets/images/splash-icon.png',
     resizeMode: 'contain',
@@ -16,6 +17,13 @@ const config: ExpoConfig = {
   },
   android: {
     package: 'com.example.omimobile',
+    adaptiveIcon: {
+      foregroundImage: './assets/images/adaptive-icon.png',
+      backgroundColor: '#ffffff',
+    },
+  },
+  web: {
+    favicon: './assets/images/favicon.png',
   },
   extra: {
     apiBaseUrl: HOST,
