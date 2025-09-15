@@ -1276,7 +1276,7 @@ if (ENABLE_USER_SYSTEM) {
         if (!present.has(s)) list.push({ slot: s, isActive: false, conversationId: '', userId: req.user.id, id: '', createdAt: new Date(), conversation: null });
       }
       list.sort((a, b) => a.slot - b.slot);
-      const items = list.map(w => ({ slot: w.slot, isActive: !!w.isActive, title: w.conversation?.title || null, summary: w.conversation?.summary || null }));
+      const items = list.map(w => ({ slot: w.slot, isActive: !!w.isActive, conversationId: w.conversationId || null, title: w.conversation?.title || null, summary: w.conversation?.summary || null }));
       res.status(200).json({ ok: true, items });
     } catch (e) {
       res.status(500).json({ error: 'Failed to list windows' });
@@ -1318,6 +1318,20 @@ if (ENABLE_USER_SYSTEM) {
     }
   });
 
+  // Delete a memory
+  app.delete('/memories/:id', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const id = String(req.params.id);
+      const mem = await prisma.memory.findUnique({ where: { id } });
+      if (!mem || mem.userId !== req.user.id) return res.status(404).json({ error: 'Not found' });
+      await prisma.memory.delete({ where: { id } });
+      res.status(200).json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to delete memory' });
+    }
+  });
+
   // Agent Events (lightweight tasks/todos log)
   app.get('/agent-events', requireAuth, async (req, res) => {
     try {
@@ -1350,6 +1364,21 @@ if (ENABLE_USER_SYSTEM) {
       res.status(201).json({ ok: true, event: { id: event.id, type: event.type, payload: event.payload, createdAt: event.createdAt } });
     } catch (e) {
       res.status(500).json({ error: 'Failed to create agent event' });
+    }
+  });
+
+  // Mark an agent event task as completed (adds payload.done=true and completedAt)
+  app.patch('/agent-events/:id/complete', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const id = String(req.params.id);
+      const event = await prisma.agentEvent.findUnique({ where: { id } });
+      if (!event || event.userId !== req.user.id) return res.status(404).json({ error: 'Not found' });
+      const payload = Object.assign({}, event.payload || {}, { done: true, completedAt: new Date().toISOString() });
+      const updated = await prisma.agentEvent.update({ where: { id }, data: { payload } });
+      res.status(200).json({ ok: true, event: { id: updated.id, type: updated.type, payload: updated.payload, createdAt: updated.createdAt } });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to complete task' });
     }
   });
 
@@ -2209,6 +2238,26 @@ app.post('/omi-webhook', async (req, res) => {
               });
             } catch (m2Err) {
               console.warn('Assistant message persist error:', m2Err?.message || m2Err);
+            }
+
+            // Ensure the user's active window points at this conversation so it appears in the app immediately
+            try {
+              if (sessionRow && sessionRow.userId) {
+                const userId = sessionRow.userId;
+                let active = await prisma.userContextWindow.findFirst({ where: { userId, isActive: true } });
+                if (!active) {
+                  const existingSlot1 = await prisma.userContextWindow.findUnique({ where: { userId_slot: { userId, slot: 1 } } });
+                  if (!existingSlot1) {
+                    await prisma.userContextWindow.create({ data: { userId, slot: 1, conversationId: conversationRow.id, isActive: true } });
+                  } else {
+                    await prisma.userContextWindow.update({ where: { userId_slot: { userId, slot: 1 } }, data: { conversationId: conversationRow.id, isActive: true } });
+                  }
+                } else {
+                  await prisma.userContextWindow.update({ where: { userId_slot: { userId, slot: active.slot } }, data: { conversationId: conversationRow.id } });
+                }
+              }
+            } catch (winErr) {
+              console.warn('Failed to sync active window to OMI conversation:', winErr?.message || winErr);
             }
           }
         } catch (postPersistErr) {
