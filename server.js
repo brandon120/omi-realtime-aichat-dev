@@ -25,20 +25,53 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 // CORS (allow Expo/web and configured origins)
-const allowedOrigins = String(process.env.CORS_ORIGINS || 'http://localhost:8081')
+const defaultOriginsCsv = [
+  'http://localhost:8081',
+  'http://localhost:19006',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  // Netlify preview/prod site used by this app
+  'https://omi-ai-realtime-chat-app.netlify.app'
+].join(',');
+const originsCsv = (process.env.CORS_ORIGINS && process.env.CORS_ORIGINS.length > 0)
+  ? process.env.CORS_ORIGINS
+  : defaultOriginsCsv;
+const allowedOrigins = originsCsv
   .split(',')
   .map((s) => s.trim())
   .filter((s) => s.length > 0);
+const allowedPatterns = String(process.env.CORS_ORIGIN_PATTERNS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
+function isOriginAllowed(origin) {
+  if (!origin) return false;
+  if (allowedOrigins.includes('*')) return true;
+  if (allowedOrigins.includes(origin)) return true;
+  // simple wildcard support for patterns like https://*.netlify.app
+  for (const pattern of allowedPatterns) {
+    if (pattern.startsWith('https://*.')) {
+      const suffix = pattern.replace('https://*.', 'https://');
+      if (origin.endsWith(suffix)) return true;
+    }
+    if (pattern.startsWith('http://*.')) {
+      const suffix = pattern.replace('http://*.', 'http://');
+      if (origin.endsWith(suffix)) return true;
+    }
+  }
+  return false;
+}
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin && (allowedOrigins.includes('*') || allowedOrigins.includes(origin))) {
+  if (origin && isOriginAllowed(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
   }
-  res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
   // Allow credentials so cookie-based auth works when enabled
   res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Max-Age', '86400');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(204);
   }
