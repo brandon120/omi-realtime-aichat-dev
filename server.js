@@ -885,8 +885,11 @@ app.get('/help', (req, res) => {
     },
     examples: [
       'Hey Omi, what is the weather like in Sydney, Australia?',
-      'Hey Omi, can you help me solve a math problem?',
-      'Hey Omi, what are the latest news headlines?'
+      'Hey Omi, switch to memories space',
+      'Hey Omi, list conversations',
+      'Hey Omi, select window 2',
+      'Hey Omi, remember this as a memory: my passport is in the top drawer',
+      'Hey Omi, add a task to follow up with Alice tomorrow'
     ],
     help_keywords: {
       description: 'You can also ask for help using these words:',
@@ -900,7 +903,29 @@ app.get('/help', (req, res) => {
     features: {
       web_search: 'Built-in web search for current information',
       natural_language: 'Understands natural conversation patterns',
-      rate_limiting: 'Smart rate limiting to prevent API errors'
+      rate_limiting: 'Smart rate limiting to prevent API errors',
+      spaces: 'List and switch spaces: default, todos, memories, tasks, agent, friends, notifications',
+      windows: 'List conversation windows and switch directly by number (1-5)'
+    },
+    voice_commands: {
+      spaces: [
+        'Hey Omi, list spaces',
+        'Hey Omi, switch to tasks space',
+        'Hey Omi, switch to window 3',
+        'Hey Omi, change conversation window'
+      ],
+      conversations: [
+        'Hey Omi, list conversations',
+        'Hey Omi, select window 2'
+      ],
+      memories: [
+        'Hey Omi, remember this as a memory: <fact>',
+        'Hey Omi, save a memory: <fact>'
+      ],
+      tasks: [
+        'Hey Omi, add a task to <do something>',
+        'Hey Omi, list my tasks'
+      ]
     }
   });
 });
@@ -1189,6 +1214,76 @@ if (ENABLE_USER_SYSTEM) {
       res.status(200).json({ ok: true, items });
     } catch (e) {
       res.status(500).json({ error: 'Failed to list windows' });
+    }
+  });
+
+  // Memories
+  app.get('/memories', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const cursor = req.query.cursor ? new Date(String(req.query.cursor)) : null;
+      const where = { userId: req.user.id };
+      const items = await prisma.memory.findMany({
+        where: cursor ? { AND: [where, { createdAt: { lt: cursor } }] } : where,
+        orderBy: { createdAt: 'desc' },
+        take: limit + 1,
+        select: { id: true, text: true, createdAt: true }
+      });
+      const hasMore = items.length > limit;
+      const page = hasMore ? items.slice(0, limit) : items;
+      const nextCursor = hasMore ? page[page.length - 1].createdAt.toISOString() : null;
+      res.status(200).json({ ok: true, items: page, nextCursor });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to list memories' });
+    }
+  });
+
+  app.post('/memories', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const { text } = req.body || {};
+      const memText = String(text || '').trim();
+      if (!memText) return res.status(400).json({ error: 'text is required' });
+      const memory = await prisma.memory.create({ data: { userId: req.user.id, text: memText } });
+      res.status(201).json({ ok: true, memory: { id: memory.id, text: memory.text, createdAt: memory.createdAt } });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to create memory' });
+    }
+  });
+
+  // Agent Events (lightweight tasks/todos log)
+  app.get('/agent-events', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const cursor = req.query.cursor ? new Date(String(req.query.cursor)) : null;
+      const where = { userId: req.user.id };
+      const items = await prisma.agentEvent.findMany({
+        where: cursor ? { AND: [where, { createdAt: { lt: cursor } }] } : where,
+        orderBy: { createdAt: 'desc' },
+        take: limit + 1,
+        select: { id: true, type: true, payload: true, createdAt: true }
+      });
+      const hasMore = items.length > limit;
+      const page = hasMore ? items.slice(0, limit) : items;
+      const nextCursor = hasMore ? page[page.length - 1].createdAt.toISOString() : null;
+      res.status(200).json({ ok: true, items: page, nextCursor });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to list agent events' });
+    }
+  });
+
+  app.post('/agent-events', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const { type, payload } = req.body || {};
+      const eventType = String(type || '').trim();
+      if (!eventType) return res.status(400).json({ error: 'type is required' });
+      const event = await prisma.agentEvent.create({ data: { userId: req.user.id, type: eventType, payload: payload ?? null } });
+      res.status(201).json({ ok: true, event: { id: event.id, type: event.type, payload: event.payload, createdAt: event.createdAt } });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to create agent event' });
     }
   });
 
@@ -1703,6 +1798,38 @@ app.post('/omi-webhook', async (req, res) => {
       return res.status(200).json({ message: msg });
     }
 
+    // Direct window selection intent: "select window 1-5" or "switch to window 2"
+    {
+      const m = question.toLowerCase().match(/\b(?:select\s+window\s+|switch\s+to\s+window\s+|window\s+)([1-5])\b/);
+      if (m) {
+        const chosen = Number(m[1]);
+        try {
+          if (ENABLE_USER_SYSTEM && prisma) {
+            const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
+            if (sessionRow && sessionRow.userId) {
+              let contextWindow = await prisma.userContextWindow.findUnique({ where: { userId_slot: { userId: sessionRow.userId, slot: chosen } } });
+              if (!contextWindow) {
+                const conversation = await prisma.conversation.create({ data: { userId: sessionRow.userId, openaiConversationId: '' } });
+                contextWindow = await prisma.userContextWindow.create({ data: { userId: sessionRow.userId, slot: chosen, conversationId: conversation.id, isActive: true } });
+              }
+              await prisma.userContextWindow.updateMany({ where: { userId: sessionRow.userId }, data: { isActive: false } });
+              await prisma.userContextWindow.update({ where: { userId_slot: { userId: sessionRow.userId, slot: chosen } }, data: { isActive: true } });
+              const summaryRow = await prisma.conversation.findUnique({ where: { id: contextWindow.conversationId }, select: { title: true, summary: true } });
+              const summaryText = `Switched to window ${chosen}.` + (summaryRow ? ` Title: ${summaryRow.title || 'Untitled'}.` + (summaryRow.summary ? ` ${summaryRow.summary}` : '') : '');
+              const msg = await formatMessageWithFooter(session_id, summaryText.trim());
+              sessionTranscripts.delete(session_id);
+              return res.status(200).json({ message: msg });
+            }
+          }
+        } catch (e) {
+          console.warn('Direct window selection error:', e?.message || e);
+        }
+        const msg = await formatMessageWithFooter(session_id, 'Unable to switch window right now.');
+        sessionTranscripts.delete(session_id);
+        return res.status(200).json({ message: msg });
+      }
+    }
+
     // Intent: change conversation window -> prompt for selection
     if (/\b(change|switch)\s+(conversation\s+window|window|context)\b/i.test(question)) {
       if (ENABLE_USER_SYSTEM && prisma) {
@@ -1737,22 +1864,119 @@ app.post('/omi-webhook', async (req, res) => {
       return res.status(200).json({ message: msg });
     }
     
-    // ---- OMI Import intent hooks ----
+    // ---- OMI Import + Task hooks ----
     const uid = req.body?.user_id || req.query?.uid; // allow either source of uid
 
     // Memory intent (e.g., "remember/save/note ... as a memory/fact")
     if (/\b(remember|save|note)\b.*\b(memory|fact)\b/i.test(question)) {
-      try {
-        await omiCreateMemories({ uid, text: question, text_source: 'other' });
-        const msg = await formatMessageWithFooter(session_id, 'Saved to your OMI memories.');
-        sessionTranscripts.delete(session_id);
-        return res.status(200).json({ message: msg });
-      } catch (e) {
-        console.error('Memory import failed:', e);
-        const msg = await formatMessageWithFooter(session_id, 'I tried to save that as a memory but hit an error.');
-        sessionTranscripts.delete(session_id);
-        return res.status(200).json({ message: msg });
+      // 1) Save to local DB if linked
+      let localSaved = false;
+      if (ENABLE_USER_SYSTEM && prisma) {
+        try {
+          const linkedUserId = await findLinkedUserIdForSession(session_id);
+          if (linkedUserId) {
+            await prisma.memory.create({ data: { userId: linkedUserId, text: question } });
+            localSaved = true;
+          }
+        } catch (e) {
+          console.warn('Local memory save failed:', e?.message || e);
+        }
       }
+      // 2) Forward to OMI memories API when uid provided
+      let remoteSaved = false;
+      try {
+        if (uid) {
+          await omiCreateMemories({ uid, text: question, text_source: 'other' });
+          remoteSaved = true;
+        }
+      } catch (e) {
+        console.warn('Remote OMI memory import failed:', e?.message || e);
+      }
+      const msg = await formatMessageWithFooter(session_id, localSaved || remoteSaved ? 'Saved to your memories.' : 'I tried to save that as a memory but hit an error.');
+      sessionTranscripts.delete(session_id);
+      return res.status(200).json({ message: msg });
+    }
+
+    // Task intent: add task/todo (persist as AgentEvent)
+    if (/\b(add|create|log)\b.*\b(task|todo)\b/i.test(question)) {
+      let saved = false;
+      if (ENABLE_USER_SYSTEM && prisma) {
+        try {
+          const linkedUserId = await findLinkedUserIdForSession(session_id);
+          if (linkedUserId) {
+            await prisma.agentEvent.create({ data: { userId: linkedUserId, type: 'task_created', payload: { text: question } } });
+            saved = true;
+          }
+        } catch (e) {
+          console.warn('Task create failed:', e?.message || e);
+        }
+      }
+      const msg = await formatMessageWithFooter(session_id, saved ? 'Task added.' : 'I tried to add that task but hit an error.');
+      sessionTranscripts.delete(session_id);
+      return res.status(200).json({ message: msg });
+    }
+
+    // Task intent: list tasks (recent agent events)
+    if (/\b(list|show)\b.*\b(tasks|todos)\b/i.test(question)) {
+      if (ENABLE_USER_SYSTEM && prisma) {
+        try {
+          const linkedUserId = await findLinkedUserIdForSession(session_id);
+          if (linkedUserId) {
+            const events = await prisma.agentEvent.findMany({ where: { userId: linkedUserId }, orderBy: { createdAt: 'desc' }, take: 5 });
+            const lines = events.map((e, i) => `${i + 1}. ${e.type}${e.payload ? ' — ' + JSON.stringify(e.payload).slice(0, 80) : ''}`);
+            const msg = await formatMessageWithFooter(session_id, lines.length ? `Your recent tasks:\n${lines.join('\n')}` : 'No tasks yet.');
+            sessionTranscripts.delete(session_id);
+            return res.status(200).json({ message: msg });
+          }
+        } catch (e) {
+          console.warn('List tasks failed:', e?.message || e);
+        }
+      }
+      const msg = await formatMessageWithFooter(session_id, 'I could not access your tasks.');
+      sessionTranscripts.delete(session_id);
+      return res.status(200).json({ message: msg });
+    }
+
+    // List memories
+    if (/\b(list|show)\b.*\b(memories)\b/i.test(question)) {
+      if (ENABLE_USER_SYSTEM && prisma) {
+        try {
+          const linkedUserId = await findLinkedUserIdForSession(session_id);
+          if (linkedUserId) {
+            const memories = await prisma.memory.findMany({ where: { userId: linkedUserId }, orderBy: { createdAt: 'desc' }, take: 5 });
+            const lines = memories.map((m, i) => `${i + 1}. ${m.text}`);
+            const msg = await formatMessageWithFooter(session_id, lines.length ? `Your recent memories:\n${lines.join('\n')}` : 'No memories yet.');
+            sessionTranscripts.delete(session_id);
+            return res.status(200).json({ message: msg });
+          }
+        } catch (e) {
+          console.warn('List memories failed:', e?.message || e);
+        }
+      }
+      const msg = await formatMessageWithFooter(session_id, 'I could not access your memories.');
+      sessionTranscripts.delete(session_id);
+      return res.status(200).json({ message: msg });
+    }
+
+    // List notifications
+    if (/\b(list|show)\b.*\b(notifications)\b/i.test(question)) {
+      if (ENABLE_USER_SYSTEM && prisma) {
+        try {
+          const linkedUserId = await findLinkedUserIdForSession(session_id);
+          if (linkedUserId) {
+            const events = await prisma.notificationEvent.findMany({ where: { userId: linkedUserId }, orderBy: { createdAt: 'desc' }, take: 5 });
+            const lines = events.map((e, i) => `${i + 1}. [${e.channel}] ${e.message} — ${e.status}`);
+            const msg = await formatMessageWithFooter(session_id, lines.length ? `Your recent notifications:\n${lines.join('\n')}` : 'No notifications.');
+            sessionTranscripts.delete(session_id);
+            return res.status(200).json({ message: msg });
+          }
+        } catch (e) {
+          console.warn('List notifications failed:', e?.message || e);
+        }
+      }
+      const msg = await formatMessageWithFooter(session_id, 'I could not access your notifications.');
+      sessionTranscripts.delete(session_id);
+      return res.status(200).json({ message: msg });
     }
 
     // Conversation intent (e.g., "log/record/create conversation/meeting/call ...")

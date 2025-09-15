@@ -41,6 +41,27 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="spaces"
+        options={{
+          title: 'Spaces',
+          tabBarIcon: ({ color }) => <TabBarIcon name="th-large" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="memories"
+        options={{
+          title: 'Memories',
+          tabBarIcon: ({ color }) => <TabBarIcon name="bookmark" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="tasks"
+        options={{
+          title: 'Tasks',
+          tabBarIcon: ({ color }) => <TabBarIcon name="check-square" color={color} />,
+        }}
+      />
+      <Tabs.Screen
         name="settings"
         options={{
           title: 'Settings',
