@@ -33,7 +33,7 @@ export default function TabOneScreen() {
         </View>
         <View style={styles.row}>
           <Card title="Memories" href="/(tabs)/memories" description="Save and browse memories" />
-          <Card title="Control" href="/(tabs)/control" description="Send messages to assistant" />
+          <Card title="Chat" href="/(tabs)/control" description="Chat with the assistant" />
         </View>
         <View style={styles.rowSingle}>
           <Card title="Settings" href="/(tabs)/settings" description="Manage Omi link and account" />
