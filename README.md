@@ -1,10 +1,10 @@
 # Omi Real-Time AI Chat Plugin
 
-A Node.js backend plugin for Omi that provides real-time AI chat capabilities using OpenAI's Responses API (gpt-4o / gpt-4o-mini) with Conversations for stateful chats. When users say "hey omi" followed by a question, the plugin processes the question and sends the response back to the user via Omi's notification system.
+A Node.js backend plugin for Omi that provides real-time AI chat capabilities using OpenAI's Responses API (gpt-4o / gpt-4o-mini) with Conversations for stateful chats. When users say a trigger like "hey omi" (or just "omi" or "assistant") followed by a question, the plugin processes the question and sends the response back to the user via Omi's notification system.
 
 ## 🚀 Features
 
-- **Voice Activation**: Listens for transcripts starting with "hey omi"
+- **Voice Activation**: Listens for transcripts that include "hey omi", "omi", or "assistant" (case-insensitive)
 - **Responses + Conversations**: Uses OpenAI's Responses API with Conversations for per-session context
 - **Web Search Tool**: Enables built-in `web_search` via Responses API tools for current info
 - **Real-time Notifications**: Sends responses back to users through Omi's notification API
@@ -165,7 +165,7 @@ Your webhook URL will be: `https://your-app-name.railway.app/omi-webhook`
 - **Plugin Name**: Omi AI Chat
 - **Description**: Real-time AI chat using GPT-4
 - **Webhook URL**: `https://your-app-name.railway.app/omi-webhook`
-- **Trigger Phrase**: `hey omi`
+- **Trigger Phrases**: `hey omi`, `omi`, `assistant`
 - **Permissions**: 
   - Read transcripts
   - Send notifications
@@ -290,7 +290,7 @@ The plugin handles various error scenarios:
 - **Missing Fields**: Returns 400 for incomplete webhook data
 - **API Errors**: Handles OpenAI and Omi API errors gracefully
 - **Network Issues**: Retries and provides clear error messages
-- **Validation**: Ensures transcripts start with "hey omi"
+- **Validation**: Ensures transcripts contain a trigger such as "hey omi", "omi", or "assistant"
 
 ## 🔒 Security Considerations
 
