@@ -333,8 +333,7 @@ const sessionConversations = new Map();
 // Last processed question per session to prevent duplicate triggers
 const lastProcessedQuestion = new Map();
 
-// Track activation detection per session to delay processing until end-of-utterance
-const sessionActivationState = new Map(); // sessionId -> { detectedAt:number, index:number, remainderSegments?:Array<object> }
+// Follow-up hold only; no activation accumulation needed
 // Follow-up behavior: wait for next "Omi" or timeout
 const FOLLOWUP_WAIT_MS = Number(process.env.FOLLOWUP_WAIT_MS || 5000);
 const FOLLOWUP_WORD_REGEX = /\bomi\b/i;
@@ -342,16 +341,7 @@ const sessionFollowupHold = new Map(); // sessionId -> { startedAt:number, lastA
 const sessionFollowupTimers = new Map(); // sessionId -> Timeout
 
 function clearTranscriptAndActivation(sessionId) {
-  try {
-    const activation = sessionActivationState.get(sessionId);
-    const remainder = activation && activation.remainderSegments;
-    if (remainder && Array.isArray(remainder) && remainder.length > 0) {
-      sessionTranscripts.set(sessionId, remainder);
-    } else {
-      sessionTranscripts.delete(sessionId);
-    }
-  } catch {}
-  try { sessionActivationState.delete(sessionId); } catch {}
+  try { sessionTranscripts.delete(sessionId); } catch {}
 }
 
 function clearFollowupHold(sessionId) {
@@ -398,41 +388,7 @@ function isInFollowupHold(sessionId) {
   return sessionFollowupHold.has(sessionId);
 }
 
-function buildQuestionCandidate(segments, activationIndex, activationMatch, activationRegex) {
-  if (activationIndex < 0 || activationIndex >= segments.length) return '';
-  const parts = [];
-  for (let i = activationIndex; i < segments.length; i++) {
-    const seg = segments[i];
-    if (typeof seg.text !== 'string') continue;
-    if (i === activationIndex) {
-      // Use the matched trigger to slice the leading invocation phrase
-      if (activationMatch && typeof activationMatch.index === 'number') {
-        const startIndex = activationMatch.index + activationMatch[0].length;
-        parts.push(seg.text.substring(startIndex));
-      } else {
-        // Fallback: remove the trigger phrase using regex again
-        const m = activationRegex.exec(seg.text);
-        if (m && typeof m.index === 'number') {
-          parts.push(seg.text.substring(m.index + m[0].length));
-        } else {
-          parts.push(seg.text);
-        }
-      }
-    } else {
-      parts.push(seg.text);
-    }
-  }
-  return parts.join(' ').trim();
-}
-
-function isUtteranceProbablyComplete(text) {
-  // Retained for potential future use; unused under follow-up gating
-  if (!text) return false;
-  if (/[\.!?…]\s*$/.test(text)) return true;
-  if (/\b(thanks|thank you|that'?s all|done|over)\b[\.!?]?\s*$/i.test(text)) return true;
-  if (text.length >= 180) return true;
-  return false;
-}
+// Removed legacy end-of-utterance heuristics in favor of explicit follow-up gating
 
 function findNextOmiBoundaryAfter(segments, startIndex, startOffsetInFirstSegment) {
   for (let i = startIndex; i < segments.length; i++) {
@@ -1815,37 +1771,10 @@ app.post('/omi-webhook', async (req, res) => {
       return res.status(200).json({});
     }
 
-    // Track first time we detected activation and build a rolling candidate until utterance is complete
-    const existingActivation = sessionActivationState.get(session_id);
-    const nowTs = Date.now();
-    if (!existingActivation) {
-      sessionActivationState.set(session_id, { detectedAt: nowTs, index: activationFoundIndex });
-    } else if (typeof existingActivation.index === 'number') {
-      existingActivation.index = Math.min(existingActivation.index, activationFoundIndex);
-      // Preserve original detectedAt to allow full wait window
-      sessionActivationState.set(session_id, existingActivation);
-    }
-
-    const activationState = sessionActivationState.get(session_id);
+    // Build candidate from activation to either the next "Omi" or end
     const startOffset = (activationMatch && typeof activationMatch.index === 'number') ? (activationMatch.index + activationMatch[0].length) : 0;
-    const boundary = findNextOmiBoundaryAfter(sessionSegments, activationState.index, startOffset);
-    const { candidate, remainder } = buildCandidateAndRemainder(sessionSegments, activationState.index, activationMatch, activationRegex, boundary);
-
-    // If we found a boundary, we can proceed immediately and keep the remainder as the next transcript baseline.
-    // Otherwise, wait up to FOLLOWUP_WAIT_MS for a possible follow-up "Omi".
-    if (!boundary) {
-      const waitedMs = nowTs - activationState.detectedAt;
-      if (waitedMs < FOLLOWUP_WAIT_MS) {
-        console.log('⏳ Waiting for potential follow-up "Omi" before responding...');
-        return res.status(200).json({});
-      }
-    }
-
-    if (remainder) {
-      const existing = sessionActivationState.get(session_id) || {};
-      sessionActivationState.set(session_id, { ...existing, remainderSegments: remainder });
-    }
-
+    const boundary = findNextOmiBoundaryAfter(sessionSegments, activationFoundIndex, startOffset);
+    const { candidate } = buildCandidateAndRemainder(sessionSegments, activationFoundIndex, activationMatch, activationRegex, boundary);
     let question = candidate.trim();
     
     if (!question) {
