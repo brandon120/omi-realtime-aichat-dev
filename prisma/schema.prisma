@@ -118,6 +118,8 @@ model Conversation {
   messages              Message[]
   contextWindows        UserContextWindow[]
   agentEvents           AgentEvent[]
+  // Back-relation for UserPreference.defaultConversation
+  defaultForUserPreferences UserPreference[]
 
   @@index([userId])
   @@index([omiSessionId])
