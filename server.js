@@ -316,12 +316,27 @@ if (ENABLE_USER_SYSTEM) {
         where: cursor ? { AND: [where, { createdAt: { lt: cursor } }] } : where,
         orderBy: { createdAt: 'desc' },
         take: limit + 1,
-        select: { id: true, title: true, summary: true, createdAt: true }
+        select: {
+          id: true,
+          title: true,
+          summary: true,
+          createdAt: true,
+          openaiConversationId: true,
+          omiSession: { select: { omiSessionId: true } }
+        }
       });
       const hasMore = items.length > limit;
       const page = hasMore ? items.slice(0, limit) : items;
       const nextCursor = hasMore ? page[page.length - 1].createdAt.toISOString() : null;
-      res.status(200).json({ ok: true, items: page, nextCursor });
+      const mapped = page.map((i) => ({
+        id: i.id,
+        title: i.title,
+        summary: i.summary,
+        createdAt: i.createdAt,
+        openaiConversationId: i.openaiConversationId || null,
+        omiSessionKey: i.omiSession ? i.omiSession.omiSessionId : null
+      }));
+      res.status(200).json({ ok: true, items: mapped, nextCursor });
     } catch (e) {
       console.error('List conversations error:', e);
       res.status(500).json({ error: 'Failed to list conversations' });
@@ -335,10 +350,25 @@ if (ENABLE_USER_SYSTEM) {
       const id = String(req.params.id);
       const convo = await prisma.conversation.findFirst({
         where: { id, OR: [ { userId: req.user.id }, { omiSession: { userId: req.user.id } } ] },
-        select: { id: true, title: true, summary: true, createdAt: true }
+        select: {
+          id: true,
+          title: true,
+          summary: true,
+          createdAt: true,
+          openaiConversationId: true,
+          omiSession: { select: { omiSessionId: true } }
+        }
       });
       if (!convo) return res.status(404).json({ error: 'Not found' });
-      res.status(200).json({ ok: true, conversation: convo });
+      const mapped = {
+        id: convo.id,
+        title: convo.title,
+        summary: convo.summary,
+        createdAt: convo.createdAt,
+        openaiConversationId: convo.openaiConversationId || null,
+        omiSessionKey: convo.omiSession ? convo.omiSession.omiSessionId : null
+      };
+      res.status(200).json({ ok: true, conversation: mapped });
     } catch (e) {
       console.error('Get conversation error:', e);
       res.status(500).json({ error: 'Failed to get conversation' });

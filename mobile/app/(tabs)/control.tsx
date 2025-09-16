@@ -232,6 +232,20 @@ export default function ChatScreen() {
           keyExtractor={(c: ConversationItem) => c.id}
         />
       )}
+      {selectedId ? (
+        <View style={{ padding: 12, gap: 4 }}>
+          {(() => {
+            const meta = convos.items.find((c: ConversationItem) => c.id === selectedId);
+            if (!meta) return null as any;
+            return (
+              <>
+                {meta.omiSessionKey ? <Text style={{ color: '#666', fontSize: 12 }}>OMI session: {meta.omiSessionKey}</Text> : null}
+                {meta.openaiConversationId ? <Text style={{ color: '#666', fontSize: 12 }}>OpenAI conv: {meta.openaiConversationId}</Text> : null}
+              </>
+            );
+          })()}
+        </View>
+      ) : null}
       <View style={{ height: 12 }} />
       {prefs ? (
         <View>
@@ -315,6 +329,16 @@ export default function ChatScreen() {
                     </TouchableOpacity>
                   ) : null}
                 </View>
+                {(() => {
+                  const meta = convos.items.find((c: ConversationItem) => c.id === selectedId);
+                  if (!meta) return null as any;
+                  return (
+                    <View style={{ paddingHorizontal: 12, paddingBottom: 10 }}>
+                      {meta.omiSessionKey ? <Text style={{ color: '#999', fontSize: 12 }}>OMI session: {meta.omiSessionKey}</Text> : null}
+                      {meta.openaiConversationId ? <Text style={{ color: '#999', fontSize: 12 }}>OpenAI conv: {meta.openaiConversationId}</Text> : null}
+                    </View>
+                  );
+                })()}
               </>
             )}
           </View>
@@ -369,6 +393,16 @@ export default function ChatScreen() {
                     <Text style={styles.sendBtnText}>{sending ? '...' : 'Send'}</Text>
                   </TouchableOpacity>
                 </View>
+                {(() => {
+                  const meta = convos.items.find((c: ConversationItem) => c.id === selectedId);
+                  if (!meta) return null as any;
+                  return (
+                    <View style={{ paddingHorizontal: 12, paddingBottom: 10 }}>
+                      {meta.omiSessionKey ? <Text style={{ color: '#999', fontSize: 12 }}>OMI session: {meta.omiSessionKey}</Text> : null}
+                      {meta.openaiConversationId ? <Text style={{ color: '#999', fontSize: 12 }}>OpenAI conv: {meta.openaiConversationId}</Text> : null}
+                    </View>
+                  );
+                })()}
               </>
             )}
           </ThemedView>
@@ -433,6 +467,16 @@ export default function ChatScreen() {
                   </TouchableOpacity>
                 ) : null}
               </View>
+              {(() => {
+                const meta = convos.items.find((c: ConversationItem) => c.id === selectedId);
+                if (!meta) return null as any;
+                return (
+                  <View style={{ paddingHorizontal: 12, paddingBottom: 10 }}>
+                    {meta.omiSessionKey ? <Text style={{ color: '#999', fontSize: 12 }}>OMI session: {meta.omiSessionKey}</Text> : null}
+                    {meta.openaiConversationId ? <Text style={{ color: '#999', fontSize: 12 }}>OpenAI conv: {meta.openaiConversationId}</Text> : null}
+                  </View>
+                );
+              })()}
             </>
           )}
         </ThemedView>
