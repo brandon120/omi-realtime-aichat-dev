@@ -83,6 +83,48 @@ if (ENABLE_USER_SYSTEM) {
 
 // --------- Typed messaging + read APIs (feature-flagged) ---------
 if (ENABLE_USER_SYSTEM) {
+  // ---- Preferences helpers ----
+  async function getUserPreferences(userId) {
+    try {
+      const pref = await prisma.userPreference.findUnique({ where: { userId } });
+      return pref || { listenMode: 'TRIGGER', followupWindowMs: 8000, meetingTranscribe: false, injectMemories: false };
+    } catch {
+      return { listenMode: 'TRIGGER', followupWindowMs: 8000, meetingTranscribe: false, injectMemories: false };
+    }
+  }
+
+  // ---- Preferences endpoints ----
+  app.get('/preferences', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const pref = await getUserPreferences(req.user.id);
+      res.status(200).json({ ok: true, preferences: pref });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to load preferences' });
+    }
+  });
+
+  app.patch('/preferences', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const body = req.body || {};
+      const data = {};
+      if (typeof body.listen_mode === 'string') data.listenMode = body.listen_mode.toUpperCase();
+      if (typeof body.followup_window_ms === 'number') data.followupWindowMs = Math.max(1000, Math.min(60000, Math.floor(body.followup_window_ms)));
+      if (typeof body.meeting_transcribe === 'boolean') data.meetingTranscribe = body.meeting_transcribe;
+      if (typeof body.inject_memories === 'boolean') data.injectMemories = body.inject_memories;
+      if (body.default_conversation_id) data.defaultConversationId = String(body.default_conversation_id);
+      const updated = await prisma.userPreference.upsert({
+        where: { userId: req.user.id },
+        update: data,
+        create: { userId: req.user.id, ...data }
+      });
+      res.status(200).json({ ok: true, preferences: updated });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to save preferences' });
+    }
+  });
+
   // Send a user message; create/use conversation by id or by slot
   app.post('/messages/send', requireAuth, async (req, res) => {
     try {
@@ -152,10 +194,33 @@ if (ENABLE_USER_SYSTEM) {
         console.warn('Failed to persist user message:', err?.message || err);
       }
 
+      // Fetch user preferences and optional memories
+      const prefs = await getUserPreferences(req.user.id);
+      let memoryContext = '';
+      if (prefs.injectMemories) {
+        try {
+          const mems = await prisma.memory.findMany({ where: { userId: req.user.id }, orderBy: { createdAt: 'desc' }, take: 20 });
+          memoryContext = mems.map((m) => `- ${m.text}`).join('\n');
+          if (memoryContext.length > 2000) memoryContext = memoryContext.slice(0, 2000);
+        } catch {}
+      }
+
+      function buildSystemInstructions() {
+        const lines = [];
+        lines.push('You are Omi, a helpful, conversational AI.');
+        lines.push('Have a natural back-and-forth tone.');
+        lines.push('Be concise, but include concrete, actionable details when helpful.');
+        lines.push('If additional context ("memories") are provided, use them when relevant, otherwise ignore.');
+        lines.push('When you ask a question, keep it short.');
+        return lines.join(' ');
+      }
+
+      const instructions = [buildSystemInstructions(), memoryContext ? `Relevant memories:\n${memoryContext}` : ''].filter(Boolean).join('\n\n');
+
       // Call OpenAI; prefer Responses API with conversation
       let assistantText = '';
       try {
-        const payload = { model: OPENAI_MODEL, input: messageText };
+        const payload = { model: OPENAI_MODEL, input: messageText, ...(instructions ? { instructions } : {}) };
         if (openaiConvId) payload.conversation = openaiConvId;
         const response = await openai.responses.create(payload);
         assistantText = response.output_text;
@@ -165,7 +230,7 @@ if (ENABLE_USER_SYSTEM) {
           const chat = await openai.chat.completions.create({
             model: 'gpt-4o',
             messages: [
-              { role: 'system', content: 'You are a helpful assistant.' },
+              { role: 'system', content: instructions || 'You are a helpful assistant.' },
               { role: 'user', content: messageText }
             ],
             max_tokens: 600,
@@ -303,6 +368,23 @@ if (ENABLE_USER_SYSTEM) {
     } catch (e) {
       console.error('List messages error:', e);
       res.status(500).json({ error: 'Failed to list messages' });
+    }
+  });
+
+  // Delete conversation (and its messages)
+  app.delete('/conversations/:id', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      const id = String(req.params.id || '').trim();
+      if (!id) return res.status(400).json({ error: 'id is required' });
+      const owner = await prisma.conversation.findFirst({ where: { id, OR: [ { userId: req.user.id }, { omiSession: { userId: req.user.id } } ] }, select: { id: true } });
+      if (!owner) return res.status(404).json({ error: 'Conversation not found' });
+      await prisma.message.deleteMany({ where: { conversationId: id } });
+      await prisma.conversation.delete({ where: { id } });
+      res.status(200).json({ ok: true });
+    } catch (e) {
+      console.error('Delete conversation error:', e);
+      res.status(500).json({ error: 'Failed to delete conversation' });
     }
   });
 
@@ -1710,7 +1792,68 @@ app.post('/omi-webhook', async (req, res) => {
       }
     }
     
-    // Context-gated AI activation: allow more forgiving triggers anywhere in a segment
+    // Load preferences (user-linked or session-level defaults)
+    let listenMode = 'TRIGGER';
+    let followupWindowMs = 8000;
+    let injectMemories = false;
+    let meetingTranscribe = false;
+    if (ENABLE_USER_SYSTEM && prisma) {
+      try {
+        const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) }, include: { user: true, preferences: true } });
+        if (sessionRow && sessionRow.preferences) {
+          listenMode = sessionRow.preferences.listenMode;
+          followupWindowMs = sessionRow.preferences.followupWindowMs;
+          injectMemories = sessionRow.preferences.injectMemories;
+          meetingTranscribe = sessionRow.preferences.meetingTranscribe;
+        } else if (sessionRow && sessionRow.user) {
+          const pref = await prisma.userPreference.findUnique({ where: { userId: sessionRow.user.id } });
+          if (pref) {
+            listenMode = pref.listenMode;
+            followupWindowMs = pref.followupWindowMs;
+            injectMemories = pref.injectMemories;
+            meetingTranscribe = pref.meetingTranscribe;
+          }
+        }
+      } catch {}
+    }
+
+    // Special mode: meeting transcribe
+    if (meetingTranscribe) {
+      // Accumulate and wait for end signal, then save as a single memory
+      // Heuristics: look for any segment with end/is_final/is_last/segment_type==='end' or req.body.end===true
+      const endSignal = Boolean(req.body?.end || req.body?.final || req.body?.is_final) ||
+        segments.some((s) => s?.end === true || s?.final === true || s?.is_final === true || s?.is_last_segment === true || s?.segment_type === 'end');
+
+      if (!endSignal) {
+        // Keep accumulating silently
+        return res.status(200).json({});
+      }
+      // On end: persist
+      try {
+        const allText = sessionTranscripts.get(session_id)?.map((s) => s.text).join(' ').trim() || '';
+        sessionTranscripts.delete(session_id);
+        if (allText && ENABLE_USER_SYSTEM && prisma) {
+          const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
+          if (sessionRow && sessionRow.userId) {
+            // Save to local memories
+            await prisma.memory.create({ data: { userId: sessionRow.userId, text: allText } });
+          }
+        }
+        // Best-effort: also push to OMI user memories when user_id present
+        const uid = req.body?.user_id ? String(req.body.user_id) : null;
+        if (uid) {
+          try { await omiCreateMemories({ uid, text: 'Meeting transcript', text_source: 'other', memories: [ { text: allText } ] }); } catch {}
+        }
+        const msg = await formatMessageWithFooter(session_id, 'Meeting transcribed and saved to your memories.');
+        return res.status(200).json({ message: msg });
+      } catch (e) {
+        console.warn('Meeting transcribe save failed:', e?.message || e);
+        sessionTranscripts.delete(session_id);
+        return res.status(200).json({ message: 'I tried to save the meeting transcript but hit an error.' });
+      }
+    }
+
+    // Context-gated AI activation depending on preferences
     const activationRegex = /(?:^|\b)(?:\s*(hey|ok|yo|hi|hello)\s*,?\s*)?(omi|jarvis|echo|assistant)\b[,:\-\s]*/i;
     let activationFoundIndex = -1;
     let question = '';
@@ -1726,9 +1869,22 @@ app.post('/omi-webhook', async (req, res) => {
       }
     }
 
-    if (activationFoundIndex === -1) {
-      console.log('⏭️ Skipping transcript - explicit trigger not detected');
-      return res.status(200).json({});
+    if (listenMode === 'TRIGGER') {
+      if (activationFoundIndex === -1) {
+        console.log('⏭️ Skipping transcript - explicit trigger not detected');
+        return res.status(200).json({});
+      }
+    } else if (listenMode === 'FOLLOWUP') {
+      // Allow follow-up within N ms after we spoke; we track lastProcessedQuestion timestamp
+      const last = lastProcessedQuestion.get(session_id);
+      const now = Date.now();
+      const withinFollowup = last && now - last.ts <= followupWindowMs;
+      if (!withinFollowup && activationFoundIndex === -1) {
+        console.log('⏭️ Skipping transcript - waiting for follow-up or trigger');
+        return res.status(200).json({});
+      }
+    } else if (listenMode === 'ALWAYS') {
+      // Accept without trigger
     }
 
     // If no question found after trigger phrase, use remaining segments
@@ -2153,6 +2309,23 @@ app.post('/omi-webhook', async (req, res) => {
 
     try {
       // Use the new Responses API (no preview web search tool)
+      // Build system instructions and optional memory context
+      let memoryContext = '';
+      if (injectMemories && ENABLE_USER_SYSTEM && prisma) {
+        try {
+          const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
+          if (sessionRow && sessionRow.userId) {
+            const mems = await prisma.memory.findMany({ where: { userId: sessionRow.userId }, orderBy: { createdAt: 'desc' }, take: 20 });
+            memoryContext = mems.map((m) => `- ${m.text}`).join('\n');
+            if (memoryContext.length > 2000) memoryContext = memoryContext.slice(0, 2000);
+          }
+        } catch {}
+      }
+      const sysInstructions = [
+        'You are Omi, a friendly, practical assistant. Keep replies concise and conversational. Ask short follow-up questions when it helps.',
+        memoryContext ? `Relevant memories:\n${memoryContext}` : ''
+      ].filter(Boolean).join('\n\n');
+
       const requestPayload = {
         model: OPENAI_MODEL,
         input: question,
@@ -2163,6 +2336,9 @@ app.post('/omi-webhook', async (req, res) => {
       };
       if (conversationId) {
         requestPayload.conversation = conversationId;
+      }
+      if (sysInstructions) {
+        requestPayload.instructions = sysInstructions;
       }
       const response = await openai.responses.create(requestPayload);
 
@@ -2177,10 +2353,7 @@ app.post('/omi-webhook', async (req, res) => {
         const openaiResponse = await openai.chat.completions.create({
           model: 'gpt-4o',
           messages: [
-            { 
-              role: 'system', 
-              content: 'You are a helpful AI assistant. When users ask about current events, weather, news, or time-sensitive information, be honest about your knowledge cutoff and suggest they check reliable sources for the most up-to-date information. For general knowledge questions, provide helpful and accurate responses.' 
-            },
+            { role: 'system', content: sysInstructions || 'You are a helpful AI assistant.' },
             { role: 'user', content: question }
           ],
           max_tokens: 800,

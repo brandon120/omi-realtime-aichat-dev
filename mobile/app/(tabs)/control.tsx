@@ -18,6 +18,7 @@ import {
   type MessageItem
 } from '@/lib/api';
 import { apiListWindows } from '@/lib/api';
+import { apiGetPreferences, apiUpdatePreferences, type Preferences, apiDeleteConversation } from '@/lib/api';
 
 type ConversationState = {
   items: ConversationItem[];
@@ -43,6 +44,7 @@ export default function ChatScreen() {
   const isWide = width >= 900;
   const [showOverlayList, setShowOverlayList] = useState<boolean>(false);
   const convosPollRef = useRef<any>(null);
+  const [prefs, setPrefs] = useState<Preferences | null>(null);
 
   const selectedMessages = useMemo(() => {
     if (!selectedId) return [] as MessageItem[];
@@ -98,6 +100,8 @@ export default function ChatScreen() {
       const me = await apiMe();
       const verified = (me?.omi_links || []).some((l: any) => l.isVerified);
       setHasOmiLink(!!verified);
+      const p = await apiGetPreferences();
+      if (p) setPrefs(p);
     })();
     if (convosPollRef.current) clearInterval(convosPollRef.current);
     convosPollRef.current = setInterval(loadConversations, 5000);
@@ -218,6 +222,28 @@ export default function ChatScreen() {
           keyExtractor={(c: ConversationItem) => c.id}
         />
       )}
+      <View style={{ height: 12 }} />
+      {prefs ? (
+        <View>
+          <Text style={{ fontWeight: '700', marginBottom: 6 }}>AI Behavior</Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+            {(['TRIGGER','FOLLOWUP','ALWAYS'] as const).map((mode) => (
+              <TouchableOpacity key={mode} onPress={async ()=>{ const updated = await apiUpdatePreferences({ listenMode: mode }); if (updated) setPrefs(updated); }} style={[styles.badge, prefs.listenMode===mode && styles.badgeActive]}>
+                <Text style={[styles.badgeText, prefs.listenMode===mode && styles.badgeTextActive]}>{mode}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <View style={{ height: 8 }} />
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+            <TouchableOpacity onPress={async ()=>{ const updated = await apiUpdatePreferences({ injectMemories: !prefs.injectMemories }); if (updated) setPrefs(updated); }} style={[styles.badge, prefs.injectMemories && styles.badgeActive]}>
+              <Text style={[styles.badgeText, prefs.injectMemories && styles.badgeTextActive]}>Memories</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={async ()=>{ const updated = await apiUpdatePreferences({ meetingTranscribe: !prefs.meetingTranscribe }); if (updated) setPrefs(updated); }} style={[styles.badge, prefs.meetingTranscribe && styles.badgeActive]}>
+              <Text style={[styles.badgeText, prefs.meetingTranscribe && styles.badgeTextActive]}>Meeting Transcribe</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : null}
     </View>
   );
 
@@ -268,6 +294,11 @@ export default function ChatScreen() {
                   <TouchableOpacity style={styles.sendBtn} onPress={onSend} disabled={sending || !input.trim()}>
                     <Text style={styles.sendBtnText}>{sending ? '...' : 'Send'}</Text>
                   </TouchableOpacity>
+                  {selectedId ? (
+                    <TouchableOpacity style={styles.deleteBtn} onPress={async ()=>{ const ok = await apiDeleteConversation(selectedId); if (ok) { setConvos((prev)=>({ ...prev, items: prev.items.filter((i)=>i.id!==selectedId) })); setSelectedId(null); } }}>
+                      <Text style={styles.deleteBtnText}>Delete</Text>
+                    </TouchableOpacity>
+                  ) : null}
                 </View>
               </>
             )}
@@ -381,6 +412,11 @@ export default function ChatScreen() {
                 <TouchableOpacity style={styles.sendBtn} onPress={onSend} disabled={sending || !input.trim()}>
                   <Text style={styles.sendBtnText}>{sending ? '...' : 'Send'}</Text>
                 </TouchableOpacity>
+                {selectedId ? (
+                  <TouchableOpacity style={styles.deleteBtn} onPress={async ()=>{ const ok = await apiDeleteConversation(selectedId); if (ok) { setConvos((prev)=>({ ...prev, items: prev.items.filter((i)=>i.id!==selectedId) })); setSelectedId(null);} }}>
+                    <Text style={styles.deleteBtnText}>Delete</Text>
+                  </TouchableOpacity>
+                ) : null}
               </View>
             </>
           )}
@@ -414,6 +450,8 @@ const styles = StyleSheet.create({
   textInput: { flex: 1, minHeight: 40, maxHeight: 140, borderWidth: 1, borderColor: '#ccc', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8 },
   sendBtn: { backgroundColor: '#007bff', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 8 },
   sendBtnText: { color: '#fff', fontWeight: '700' },
+  deleteBtn: { backgroundColor: '#ff4d4f', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 8, marginLeft: 6 },
+  deleteBtnText: { color: '#fff', fontWeight: '700' },
   bubbleRow: { width: '100%', marginVertical: 4, paddingHorizontal: 8 },
   left: { alignItems: 'flex-start' },
   right: { alignItems: 'flex-end' },
@@ -422,5 +460,9 @@ const styles = StyleSheet.create({
   userBubble: { backgroundColor: '#007bff', borderTopRightRadius: 2 },
   assistantText: { color: '#333' },
   userText: { color: '#fff' },
+  badge: { paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1, borderColor: '#ccc', borderRadius: 999 },
+  badgeActive: { backgroundColor: '#2f95dc', borderColor: '#2f95dc' },
+  badgeText: { color: '#333' },
+  badgeTextActive: { color: '#fff' },
 });
 

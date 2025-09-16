@@ -292,6 +292,37 @@ export async function apiActivateWindow(slot: number): Promise<boolean> {
   }
 }
 
+// Preferences
+export type Preferences = {
+  listenMode: 'TRIGGER' | 'FOLLOWUP' | 'ALWAYS';
+  followupWindowMs: number;
+  meetingTranscribe: boolean;
+  injectMemories: boolean;
+  defaultConversationId?: string | null;
+};
+export async function apiGetPreferences(): Promise<Preferences | null> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.get('/preferences');
+    if (data && data.ok) return data.preferences as Preferences;
+  } catch {}
+  return null;
+}
+export async function apiUpdatePreferences(update: Partial<Preferences>): Promise<Preferences | null> {
+  const client = createApiClient();
+  try {
+    const payload: any = {};
+    if (update.listenMode) payload.listen_mode = update.listenMode;
+    if (typeof update.followupWindowMs === 'number') payload.followup_window_ms = update.followupWindowMs;
+    if (typeof update.meetingTranscribe === 'boolean') payload.meeting_transcribe = update.meetingTranscribe;
+    if (typeof update.injectMemories === 'boolean') payload.inject_memories = update.injectMemories;
+    if (update.defaultConversationId) payload.default_conversation_id = update.defaultConversationId;
+    const { data } = await client.patch('/preferences', payload);
+    if (data && data.ok) return data.preferences as Preferences;
+  } catch {}
+  return null;
+}
+
 // Memories
 export type MemoryItem = { id: string; text: string; createdAt: string };
 export async function apiListMemories(limit: number = 50, cursor?: string): Promise<{ items: MemoryItem[]; nextCursor: string | null }> {
@@ -348,6 +379,17 @@ export async function apiCompleteTask(id: string): Promise<boolean> {
   const client = createApiClient();
   try {
     const { data } = await client.patch(`/agent-events/${encodeURIComponent(id)}/complete`, {});
+    return !!(data && data.ok);
+  } catch {
+    return false;
+  }
+}
+
+// Delete conversation
+export async function apiDeleteConversation(id: string): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.delete(`/conversations/${encodeURIComponent(id)}`);
     return !!(data && data.ok);
   } catch {
     return false;
