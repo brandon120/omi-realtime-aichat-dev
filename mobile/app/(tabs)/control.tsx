@@ -52,7 +52,7 @@ export default function ChatScreen() {
     return (entry?.items || []).slice().sort((a: MessageItem, b: MessageItem) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   }, [messages, selectedId]);
 
-  async function loadConversations() {
+  async function loadConversations(): Promise<void> {
     setConvos((prev: ConversationState) => ({ ...prev, loading: true }));
     const res = await apiListConversations(20);
     let items = res.items;
@@ -64,9 +64,19 @@ export default function ChatScreen() {
       if (activeId && items.some((i) => i.id === activeId)) {
         setSelectedId(activeId);
       } else if (!selectedId && items.length > 0) {
-        setSelectedId(items[0].id);
+        // Try default conversation from preferences
+        try {
+          const prefsLatest = await apiGetPreferences();
+          if (prefsLatest?.defaultConversationId && items.some((i)=>i.id===prefsLatest.defaultConversationId)) {
+            setSelectedId(prefsLatest.defaultConversationId);
+          } else {
+            setSelectedId(items[0].id);
+          }
+        } catch {
+          setSelectedId(items[0].id);
+        }
       }
-      if (activeId && !items.some((i) => i.id === activeId)) {
+      if (activeId && !items.some((i: ConversationItem) => i.id === activeId)) {
         try {
           const c = await apiGetConversation(activeId);
           if (c) items = [c, ...items];
@@ -241,6 +251,11 @@ export default function ChatScreen() {
             <TouchableOpacity onPress={async ()=>{ const updated = await apiUpdatePreferences({ meetingTranscribe: !prefs.meetingTranscribe }); if (updated) setPrefs(updated); }} style={[styles.badge, prefs.meetingTranscribe && styles.badgeActive]}>
               <Text style={[styles.badgeText, prefs.meetingTranscribe && styles.badgeTextActive]}>Meeting Transcribe</Text>
             </TouchableOpacity>
+            {selectedId ? (
+              <TouchableOpacity onPress={async ()=>{ const updated = await apiUpdatePreferences({ defaultConversationId: selectedId }); if (updated) setPrefs(updated); }} style={[styles.badge, prefs.defaultConversationId===selectedId && styles.badgeActive]}>
+                <Text style={[styles.badgeText, prefs.defaultConversationId===selectedId && styles.badgeTextActive]}>Set Default</Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
         </View>
       ) : null}
@@ -295,7 +310,7 @@ export default function ChatScreen() {
                     <Text style={styles.sendBtnText}>{sending ? '...' : 'Send'}</Text>
                   </TouchableOpacity>
                   {selectedId ? (
-                    <TouchableOpacity style={styles.deleteBtn} onPress={async ()=>{ const ok = await apiDeleteConversation(selectedId); if (ok) { setConvos((prev)=>({ ...prev, items: prev.items.filter((i)=>i.id!==selectedId) })); setSelectedId(null); } }}>
+                    <TouchableOpacity style={styles.deleteBtn} onPress={async ()=>{ const ok = await apiDeleteConversation(selectedId); if (ok) { setConvos((prev: ConversationState)=>({ ...prev, items: prev.items.filter((i: ConversationItem)=>i.id!==selectedId) })); setSelectedId(null); } }}>
                       <Text style={styles.deleteBtnText}>Delete</Text>
                     </TouchableOpacity>
                   ) : null}
@@ -361,7 +376,7 @@ export default function ChatScreen() {
       ) : (
         <ThemedView style={styles.containerMobile}>
           <View style={styles.headerBar}>
-            <TouchableOpacity onPress={() => setShowOverlayList((v)=>!v)} style={styles.hamburger}>
+            <TouchableOpacity onPress={() => setShowOverlayList((v: boolean)=>!v)} style={styles.hamburger}>
               <Text style={styles.hamburgerText}>☰</Text>
             </TouchableOpacity>
             <Text style={styles.headerTitle}>Chat</Text>
@@ -413,7 +428,7 @@ export default function ChatScreen() {
                   <Text style={styles.sendBtnText}>{sending ? '...' : 'Send'}</Text>
                 </TouchableOpacity>
                 {selectedId ? (
-                  <TouchableOpacity style={styles.deleteBtn} onPress={async ()=>{ const ok = await apiDeleteConversation(selectedId); if (ok) { setConvos((prev)=>({ ...prev, items: prev.items.filter((i)=>i.id!==selectedId) })); setSelectedId(null);} }}>
+                  <TouchableOpacity style={styles.deleteBtn} onPress={async ()=>{ const ok = await apiDeleteConversation(selectedId); if (ok) { setConvos((prev: ConversationState)=>({ ...prev, items: prev.items.filter((i: ConversationItem)=>i.id!==selectedId) })); setSelectedId(null);} }}>
                     <Text style={styles.deleteBtnText}>Delete</Text>
                   </TouchableOpacity>
                 ) : null}

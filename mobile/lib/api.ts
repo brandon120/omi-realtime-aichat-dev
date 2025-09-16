@@ -1,4 +1,4 @@
-import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
+import axios, { AxiosInstance, InternalAxiosRequestConfig } from 'axios';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 import { getApiBaseUrl } from '@/constants/Config';
@@ -76,7 +76,7 @@ export function createApiClient(): AxiosInstance {
     timeout: 15000,
   });
 
-  instance.interceptors.request.use(async (config: AxiosRequestConfig) => {
+  instance.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
     const token = await getSessionToken();
     if (token) {
       config.headers = config.headers || {};
@@ -316,7 +316,7 @@ export async function apiUpdatePreferences(update: Partial<Preferences>): Promis
     if (typeof update.followupWindowMs === 'number') payload.followup_window_ms = update.followupWindowMs;
     if (typeof update.meetingTranscribe === 'boolean') payload.meeting_transcribe = update.meetingTranscribe;
     if (typeof update.injectMemories === 'boolean') payload.inject_memories = update.injectMemories;
-    if (update.defaultConversationId) payload.default_conversation_id = update.defaultConversationId;
+    if ('defaultConversationId' in update) payload.default_conversation_id = update.defaultConversationId;
     const { data } = await client.patch('/preferences', payload);
     if (data && data.ok) return data.preferences as Preferences;
   } catch {}
