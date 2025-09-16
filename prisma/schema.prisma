@@ -34,6 +34,12 @@ enum NotificationChannel {
   PUSH
 }
 
+enum ListenMode {
+  TRIGGER
+  FOLLOWUP
+  ALWAYS
+}
+
 model User {
   id                String               @id @default(uuid()) @db.Uuid
   email             String               @unique
@@ -51,6 +57,7 @@ model User {
   agentEvents       AgentEvent[]
   notificationEvents NotificationEvent[]
   memories          Memory[]
+  preferences       UserPreference?
 }
 
 model AuthSession {
@@ -91,6 +98,7 @@ model OmiSession {
 
   conversations          Conversation[]
   transcriptSegments     TranscriptSegment[]
+  preferences            OmiSessionPreference?
 
   @@index([userId])
 }
@@ -200,5 +208,31 @@ model Memory {
   createdAt DateTime @default(now())
 
   @@index([userId])
+}
+
+model UserPreference {
+  userId               String       @id @db.Uuid
+  user                 User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listenMode           ListenMode   @default(TRIGGER)
+  followupWindowMs     Int          @default(8000)
+  meetingTranscribe    Boolean      @default(false)
+  injectMemories       Boolean      @default(false)
+  defaultConversationId String?     @db.Uuid
+  defaultConversation  Conversation? @relation(fields: [defaultConversationId], references: [id], onDelete: SetNull)
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+
+  @@index([defaultConversationId])
+}
+
+model OmiSessionPreference {
+  omiSessionId        String      @id @db.Uuid
+  omiSession          OmiSession  @relation(fields: [omiSessionId], references: [id], onDelete: Cascade)
+  listenMode          ListenMode  @default(TRIGGER)
+  followupWindowMs    Int         @default(8000)
+  meetingTranscribe   Boolean     @default(false)
+  injectMemories      Boolean     @default(false)
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
 }
 
