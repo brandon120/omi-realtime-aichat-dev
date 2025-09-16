@@ -204,7 +204,14 @@ export async function apiConfirmOmiLink(omi_user_id: string, code: string): Prom
 }
 
 // Conversations & Messages
-export type ConversationItem = { id: string; title?: string | null; summary?: string | null; createdAt: string };
+export type ConversationItem = {
+  id: string;
+  title?: string | null;
+  summary?: string | null;
+  createdAt: string;
+  openaiConversationId?: string | null;
+  omiSessionKey?: string | null;
+};
 export type MessageItem = { id: string; role: 'USER' | 'ASSISTANT' | 'SYSTEM' | 'TOOL'; text: string; source: string; createdAt: string };
 
 export async function apiListConversations(limit: number = 20, cursor?: string): Promise<{ items: ConversationItem[]; nextCursor: string | null }> {
