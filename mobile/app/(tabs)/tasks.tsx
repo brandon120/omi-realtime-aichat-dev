@@ -1,9 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { StyleSheet, View, Text, Button, TextInput, Alert, FlatList, ActivityIndicator, TouchableOpacity } from 'react-native';
+import { StyleSheet, View, Text, Button, TextInput, Alert, FlatList, ActivityIndicator, TouchableOpacity, useWindowDimensions } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ThemedView, ThemedText } from '@/components/Themed';
 import { apiListAgentEvents, apiCreateTask, apiCompleteTask, AgentEventItem } from '@/lib/api';
 
 export default function TasksScreen() {
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const isSmall = width <= 375;
   const [loading, setLoading] = useState<boolean>(false);
   const [items, setItems] = useState<AgentEventItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -39,10 +43,10 @@ export default function TasksScreen() {
   useEffect(() => { load(true); }, []);
 
   return (
-    <ThemedView style={styles.container}>
+    <ThemedView style={[styles.container, isSmall && { padding: 12 }]}>
       <ThemedText type="title">Tasks</ThemedText>
-      <View style={styles.row}>
-        <TextInput style={styles.input} value={text} onChangeText={setText} placeholder="Add a task..." />
+      <View style={[styles.row, isSmall && { gap: 6 }]}>
+        <TextInput style={[styles.input, isSmall && { paddingVertical: 8 }]} value={text} onChangeText={setText} placeholder="Add a task..." />
         <Button title="Add" onPress={addTask} />
       </View>
       {loading && items.length === 0 ? <ActivityIndicator /> : null}
@@ -69,6 +73,7 @@ export default function TasksScreen() {
             </View>
           </View>
         )}
+        contentContainerStyle={{ paddingBottom: 12 + Math.max(insets.bottom, 8) }}
         ListFooterComponent={() => (
           cursor ? <Button title={loading ? 'Loading...' : 'Load more'} onPress={() => load(false)} /> : <Text style={styles.cardMeta}>No more</Text>
         )}

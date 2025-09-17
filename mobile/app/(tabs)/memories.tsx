@@ -1,10 +1,14 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { StyleSheet, View, Text, Button, TextInput, Alert, FlatList, ActivityIndicator, TouchableOpacity } from 'react-native';
+import { StyleSheet, View, Text, Button, TextInput, Alert, FlatList, ActivityIndicator, TouchableOpacity, useWindowDimensions } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Swipeable } from 'react-native-gesture-handler';
 import { ThemedView, ThemedText } from '@/components/Themed';
 import { apiListMemories, apiCreateMemory, apiDeleteMemory, MemoryItem, apiImportMemoriesFromOmi } from '@/lib/api';
 
 export default function MemoriesScreen() {
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const isSmall = width <= 375;
   const [loading, setLoading] = useState<boolean>(false);
   const [items, setItems] = useState<MemoryItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -80,13 +84,13 @@ export default function MemoriesScreen() {
   }, []);
 
   return (
-    <ThemedView style={styles.container}>
+    <ThemedView style={[styles.container, isSmall && { padding: 12 }]}>
       <ThemedText type="title">Memories</ThemedText>
-      <View style={styles.row}>
-        <TextInput style={styles.input} value={text} onChangeText={setText} placeholder="Add a memory..." />
+      <View style={[styles.row, isSmall && { gap: 6 }]}>
+        <TextInput style={[styles.input, isSmall && { paddingVertical: 8 }]} value={text} onChangeText={setText} placeholder="Add a memory..." />
         <Button title="Save" onPress={addMemory} />
       </View>
-      <View style={styles.row}>
+      <View style={[styles.row, isSmall && { gap: 6 }]}>
         <Button title={loading ? 'Syncing...' : 'Sync from OMI'} onPress={syncFromOmi} />
       </View>
       {loading && items.length === 0 ? <ActivityIndicator /> : null}
@@ -109,6 +113,7 @@ export default function MemoriesScreen() {
             </Swipeable>
           );
         }}
+        contentContainerStyle={{ paddingBottom: 12 + Math.max(insets.bottom, 8) }}
         ListFooterComponent={() => (
           cursor ? <Button title={loading ? 'Loading...' : 'Load more'} onPress={() => load(false)} /> : <Text style={styles.cardMeta}>No more</Text>
         )}
