@@ -416,6 +416,19 @@ export async function apiDeleteMemory(id: string): Promise<boolean> {
   }
 }
 
+// Import memories from OMI into local DB for the authenticated user
+export async function apiImportMemoriesFromOmi(options?: { pageLimit?: number; maxTotal?: number }): Promise<{ ok: boolean; imported?: number; skipped?: number } | null> {
+  const client = createApiClient();
+  try {
+    const payload: any = {};
+    if (options && typeof options.pageLimit === 'number') payload.limit = options.pageLimit;
+    if (options && typeof options.maxTotal === 'number') payload.max_total = options.maxTotal;
+    const { data } = await client.post('/memories/import/omi', payload);
+    if (data && typeof data.ok !== 'undefined') return data;
+  } catch {}
+  return null;
+}
+
 // Agent events (tasks)
 export type AgentEventItem = { id: string; type: string; payload?: any; createdAt: string };
 export async function apiListAgentEvents(limit: number = 50, cursor?: string): Promise<{ items: AgentEventItem[]; nextCursor: string | null }> {

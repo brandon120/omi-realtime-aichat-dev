@@ -1485,11 +1485,14 @@ if (ENABLE_USER_SYSTEM) {
       if (!links.length) return res.status(404).json({ error: 'No verified OMI link found' });
 
       const pageLimit = Math.min(Number(req.body?.limit) || 1000, 1000);
+      const maxTotal = Math.max(0, Math.min(Number(req.body?.max_total) || 0, 100000));
+      let processed = 0;
       let imported = 0;
       let skipped = 0;
       for (const link of links) {
         let offset = 0;
         let safetyCounter = 0;
+        let done = false;
         // Paginate until fewer than pageLimit returned or safety cap reached
         while (safetyCounter < 100) {
           safetyCounter++;
@@ -1503,6 +1506,8 @@ if (ENABLE_USER_SYSTEM) {
           const items = (result && (result.memories || result.items)) || [];
           if (!items.length) break;
           for (const m of items) {
+            if (maxTotal > 0 && processed >= maxTotal) { done = true; break; }
+            processed++;
             try {
               const text = String(m?.content ?? m?.text ?? '').trim();
               if (!text) { skipped++; continue; }
@@ -1516,9 +1521,11 @@ if (ENABLE_USER_SYSTEM) {
               skipped++;
             }
           }
+          if (done) break;
           if (items.length < pageLimit) break;
           offset += items.length;
         }
+        if (done) break;
       }
       res.status(200).json({ ok: true, imported, skipped });
     } catch (e) {
