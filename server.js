@@ -1476,6 +1476,56 @@ if (ENABLE_USER_SYSTEM) {
     }
   });
 
+  // Import memories from OMI into local DB for the authenticated user
+  app.post('/memories/import/omi', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      // Find verified OMI links for this user
+      const links = await prisma.omiUserLink.findMany({ where: { userId: req.user.id, isVerified: true }, select: { omiUserId: true } });
+      if (!links.length) return res.status(404).json({ error: 'No verified OMI link found' });
+
+      const pageLimit = Math.min(Number(req.body?.limit) || 1000, 1000);
+      let imported = 0;
+      let skipped = 0;
+      for (const link of links) {
+        let offset = 0;
+        let safetyCounter = 0;
+        // Paginate until fewer than pageLimit returned or safety cap reached
+        while (safetyCounter < 100) {
+          safetyCounter++;
+          let result;
+          try {
+            result = await omiReadMemories({ uid: link.omiUserId, limit: pageLimit, offset });
+          } catch (e) {
+            // Bubble up OMI API errors clearly
+            return res.status(400).json({ error: `OMI read failed: ${e.message}` });
+          }
+          const items = (result && (result.memories || result.items)) || [];
+          if (!items.length) break;
+          for (const m of items) {
+            try {
+              const text = String(m?.content ?? m?.text ?? '').trim();
+              if (!text) { skipped++; continue; }
+              // Deduplicate on exact text per user
+              const dupe = await prisma.memory.findFirst({ where: { userId: req.user.id, text } });
+              if (dupe) { skipped++; continue; }
+              const createdAt = m?.created_at ? new Date(String(m.created_at)) : undefined;
+              await prisma.memory.create({ data: { userId: req.user.id, text, ...(createdAt ? { createdAt } : {}) } });
+              imported++;
+            } catch {
+              skipped++;
+            }
+          }
+          if (items.length < pageLimit) break;
+          offset += items.length;
+        }
+      }
+      res.status(200).json({ ok: true, imported, skipped });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to import memories from OMI' });
+    }
+  });
+
   // Agent Events (lightweight tasks/todos log)
   app.get('/agent-events', requireAuth, async (req, res) => {
     try {
