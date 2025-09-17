@@ -1,0 +1,8 @@
+{
+  "meeting-summary": {
+    "id": "meeting-summary",
+    "trigger": "transcript_end",
+    "prompt": "Summarize this meeting in 4-6 bullet points. Be concise.\n\nTranscript:\n{transcript}",
+    "output_type": "memory"
+  }
+}

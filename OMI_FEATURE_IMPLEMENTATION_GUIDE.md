@@ -227,6 +227,7 @@ Fetch all memories for a user, with pagination.
 - **Memories**: Table with (id, user_id, text, source, created_at)
 - **Conversations**: Table with (id, user_id, title, status, created_at)
 - **Prompt configs**: Table or config file (id, trigger, prompt, output_type)
+- **Preferences**: Per-user and per-session preferences including activationRegex, activationSensitivity, mute, dndQuietHoursStart/End
 
 **Indices:**  
 - Unique (session_id, segment_id) for transcript segments
@@ -260,6 +261,7 @@ Fetch all memories for a user, with pagination.
 - Feature flags for new endpoints.
 - Gradual migration: dual-write to new tables, then cut over.
 - Validation: compare old/new data for consistency.
+- Quiet hours and mute: gate activation and notifications via preferences.
 
 ---
 
@@ -302,6 +304,7 @@ Fetch all memories for a user, with pagination.
   - Modularize activation logic: separate trigger phrase detection, context evaluation, and deduplication.
   - Add a context evaluation step: check recent activity, conversation state, and user preferences before activating the AI.
   - Make the activation regex and logic configurable per user/session.
+  - Implement quiet hours and mute: suppress activation/notifications during configured windows.
 - **b. Enhance memory/conversation context:**
   - Always fetch and inject recent memories and conversation history when calling OpenAI.
   - Use the conversation slot/window system to keep context organized.
@@ -340,6 +343,7 @@ Fetch all memories for a user, with pagination.
   - `apiImportMemories(uid: string, memories: MemoryItem[]): Promise<boolean>`
   - `apiListOmiConversations(uid: string, limit?: number, offset?: number, statuses?: string[]): Promise<ConversationItem[]>`
   - `apiListOmiMemories(uid: string, limit?: number, offset?: number): Promise<MemoryItem[]>`
+  - Extend Preferences DTO with: `activationRegex`, `activationSensitivity`, `mute`, `dndQuietHoursStart`, `dndQuietHoursEnd`.
 
 - Minimal UI changes:
   - Add "Sync from OMI" button in memories/conversations screens.

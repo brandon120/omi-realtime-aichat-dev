@@ -153,6 +153,14 @@ railway domain
 
 Your webhook URL will be: `https://your-app-name.railway.app/omi-webhook`
 
+If `ENABLE_NEW_OMI_ROUTES=true`, the webhook is still `/omi-webhook` but is handled by the new modular route. You can also persist transcripts via:
+
+```bash
+curl -X POST "http://localhost:3000/realtime/transcripts?session_id=test&uid=omi_user_123" \
+  -H "Content-Type: application/json" \
+  -d '[{"text":"hello from realtime"}]'
+```
+
 ## 🔌 Omi Plugin Registration
 
 ### 1. Access Omi Plugin Dashboard

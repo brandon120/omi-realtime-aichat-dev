@@ -221,6 +221,11 @@ model UserPreference {
   injectMemories        Boolean       @default(false)
   defaultConversationId String?       @db.Uuid
   defaultConversation   Conversation? @relation(fields: [defaultConversationId], references: [id], onDelete: SetNull)
+  activationRegex       String?
+  activationSensitivity Int            @default(0)
+  mute                  Boolean        @default(false)
+  dndQuietHoursStart    String?
+  dndQuietHoursEnd      String?
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
@@ -234,6 +239,11 @@ model OmiSessionPreference {
   followupWindowMs  Int        @default(8000)
   meetingTranscribe Boolean    @default(false)
   injectMemories    Boolean    @default(false)
+  activationRegex   String?
+  activationSensitivity Int    @default(0)
+  mute              Boolean    @default(false)
+  dndQuietHoursStart String?
+  dndQuietHoursEnd   String?
   createdAt         DateTime   @default(now())
   updatedAt         DateTime   @updatedAt
 }

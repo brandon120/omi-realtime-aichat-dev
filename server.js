@@ -5,6 +5,7 @@ require('dotenv').config();
 const cookieParser = require('cookie-parser');
 const argon2 = require('argon2');
 const crypto = require('crypto');
+const { ENABLE_CONTEXT_ACTIVATION, ENABLE_NEW_OMI_ROUTES, ENABLE_PROMPT_WORKERS, QUIET_HOURS_ENABLED } = require('./featureFlags');
  
 const ENABLE_USER_SYSTEM = String(process.env.ENABLE_USER_SYSTEM || 'false').toLowerCase() === 'true';
 let prisma = null;
@@ -114,6 +115,11 @@ if (ENABLE_USER_SYSTEM) {
       if (typeof body.meeting_transcribe === 'boolean') data.meetingTranscribe = body.meeting_transcribe;
       if (typeof body.inject_memories === 'boolean') data.injectMemories = body.inject_memories;
       if (body.default_conversation_id) data.defaultConversationId = String(body.default_conversation_id);
+      if (typeof body.activation_regex === 'string') data.activationRegex = String(body.activation_regex);
+      if (typeof body.activation_sensitivity === 'number') data.activationSensitivity = Math.max(-2, Math.min(2, Math.floor(body.activation_sensitivity)));
+      if (typeof body.mute === 'boolean') data.mute = !!body.mute;
+      if (typeof body.dnd_quiet_hours_start === 'string') data.dndQuietHoursStart = String(body.dnd_quiet_hours_start);
+      if (typeof body.dnd_quiet_hours_end === 'string') data.dndQuietHoursEnd = String(body.dnd_quiet_hours_end);
       const updated = await prisma.userPreference.upsert({
         where: { userId: req.user.id },
         update: data,
@@ -509,11 +515,9 @@ if (ENABLE_USER_SYSTEM) {
 
 // duplicate initialization removed
 
-// Session storage to accumulate transcript segments
+// Legacy in-memory state (deprecated). Kept temporarily for safety; new routes use DB persistence.
 const sessionTranscripts = new Map();
-// Conversation state per Omi session (OpenAI conversation id)
 const sessionConversations = new Map();
-// Last processed question per session to prevent duplicate triggers
 const lastProcessedQuestion = new Map();
 
 // Context/state per Omi session
@@ -704,6 +708,34 @@ const OPENAI_MODEL = "gpt-5-mini-2025-08-07"; // Smaller/cheaper, supports conve
 
 // No need to create an assistant - Responses API handles everything
 console.log('✅ Using OpenAI Responses API with Conversations');
+
+// Attach modular routes
+try {
+  const createRealtimeRouter = require('./routes/realtime');
+  createRealtimeRouter({ app, prisma, ENABLE_USER_SYSTEM });
+} catch (e) {
+  console.warn('Realtime routes not initialized:', e?.message || e);
+}
+try {
+  const createOmiRoutes = require('./routes/omi');
+  createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, ENABLE_USER_SYSTEM });
+} catch (e) {
+  console.warn('OMI routes not initialized:', e?.message || e);
+}
+try {
+  const createPromptRoutes = require('./routes/prompts');
+  createPromptRoutes({ app, prisma, openai, OPENAI_MODEL });
+} catch (e) {
+  console.warn('Prompt routes not initialized:', e?.message || e);
+}
+try {
+  const { startBackgroundWorkers } = require('./services/workers');
+  const workers = startBackgroundWorkers({ prisma, openai, logger: console });
+  process.on('SIGTERM', () => workers.stop());
+  process.on('SIGINT', () => workers.stop());
+} catch (e) {
+  console.warn('Workers not started:', e?.message || e);
+}
 
 /**
  * Sends a direct notification to an Omi user with rate limiting.
@@ -1731,8 +1763,8 @@ app.get('/omi/import/memories', async (req, res) => {
   }
 });
 
-// Main Omi webhook endpoint
-app.post('/omi-webhook', async (req, res) => {
+// Main Omi webhook endpoint (legacy). Disabled when ENABLE_NEW_OMI_ROUTES=true
+if (!ENABLE_NEW_OMI_ROUTES) app.post('/omi-webhook', async (req, res) => {
   try {
     console.log('📥 Received webhook from Omi:', JSON.stringify(req.body, null, 2));
     
@@ -2531,7 +2563,8 @@ app.listen(PORT, async () => {
     console.log(`🩺 DB health: http://localhost:${PORT}/health/db`);
   }
   console.log(`📖 Help & instructions: http://localhost:${PORT}/help`);
-  console.log(`📡 Webhook endpoint: http://localhost:${PORT}/omi-webhook`);
+  console.log(`📡 Webhook endpoint: http://localhost:${PORT}/omi-webhook (legacy disabled? ${ENABLE_NEW_OMI_ROUTES})`);
+  console.log(`📡 Realtime transcripts: http://localhost:${PORT}/realtime/transcripts`);
   if (ENABLE_USER_SYSTEM && !process.env.DATABASE_URL) {
     console.warn('⚠️  DATABASE_URL is not set (user system enabled)');
   }
