@@ -66,7 +66,7 @@ const styles = StyleSheet.create({
 function Card({ title, description, href, fullWidth }: { title: string; description: string; href: string; fullWidth?: boolean }) {
   return (
     <Link href={href} asChild>
-      <TouchableOpacity style={[cardStyles.card, fullWidth && { flexBasis: '100%' }]}>
+      <TouchableOpacity style={StyleSheet.flatten([cardStyles.card, fullWidth && { flexBasis: '100%' }])}>
         <Text style={cardStyles.title}>{title}</Text>
         <Text style={cardStyles.desc}>{description}</Text>
       </TouchableOpacity>
