@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { StyleSheet, View, Text, Button, TextInput, Alert, FlatList, ActivityIndicator, TouchableOpacity } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
 import { ThemedView, ThemedText } from '@/components/Themed';
-import { apiListMemories, apiCreateMemory, apiDeleteMemory, MemoryItem } from '@/lib/api';
+import { apiListMemories, apiCreateMemory, apiDeleteMemory, MemoryItem, apiImportMemoriesFromOmi } from '@/lib/api';
 
 export default function MemoriesScreen() {
   const [loading, setLoading] = useState<boolean>(false);
@@ -20,6 +20,27 @@ export default function MemoriesScreen() {
       setCursor(res.nextCursor);
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Failed to load');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function syncFromOmi() {
+    setLoading(true);
+    try {
+      const res = await apiImportMemoriesFromOmi();
+      if (!res || !res.ok) {
+        Alert.alert('Sync failed', 'Could not import from OMI');
+      } else {
+        await load(true);
+        const imported = typeof res.imported === 'number' ? res.imported : 0;
+        const skipped = typeof res.skipped === 'number' ? res.skipped : 0;
+        if (imported > 0 || skipped > 0) {
+          Alert.alert('Sync complete', `Imported ${imported}, skipped ${skipped}`);
+        }
+      }
+    } catch (e: any) {
+      Alert.alert('Sync error', e?.message || 'Failed to sync');
     } finally {
       setLoading(false);
     }
@@ -45,7 +66,18 @@ export default function MemoriesScreen() {
     setItems((prev: MemoryItem[]) => prev.filter((m) => m.id !== id));
   }
 
-  useEffect(() => { load(true); }, []);
+  useEffect(() => {
+    load(true);
+    // Auto import a small batch on first mount to keep memories fresh
+    (async () => {
+      try {
+        const res = await apiImportMemoriesFromOmi({ pageLimit: 50, maxTotal: 200 });
+        if (res && res.ok) {
+          load(true);
+        }
+      } catch {}
+    })();
+  }, []);
 
   return (
     <ThemedView style={styles.container}>
@@ -53,6 +85,9 @@ export default function MemoriesScreen() {
       <View style={styles.row}>
         <TextInput style={styles.input} value={text} onChangeText={setText} placeholder="Add a memory..." />
         <Button title="Save" onPress={addMemory} />
+      </View>
+      <View style={styles.row}>
+        <Button title={loading ? 'Syncing...' : 'Sync from OMI'} onPress={syncFromOmi} />
       </View>
       {loading && items.length === 0 ? <ActivityIndicator /> : null}
       <FlatList
