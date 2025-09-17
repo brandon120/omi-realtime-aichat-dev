@@ -695,7 +695,7 @@ function isNearDuplicate(a, b) {
 // Rate limiting for Omi notifications (max 10 per hour)
 const notificationQueue = [];
 const notificationHistory = new Map(); // Track notifications per user
-const MAX_NOTIFICATIONS_PER_HOUR = 10;
+const MAX_NOTIFICATIONS_PER_HOUR = 75;
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour in milliseconds
 
 // Initialize OpenAI client (prefer OPENAI_API_KEY per latest SDK docs)
