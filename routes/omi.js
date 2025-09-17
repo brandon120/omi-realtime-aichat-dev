@@ -22,10 +22,23 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
         if (up) pref = up;
       }
     }
-    const merged = {
-      ...pref,
-      ...(sessionPref || {})
-    };
+    // Merge session-level preferences without overriding user-level injectMemories
+    // Session prefs can override activation/listen behavior, but memory injection is a per-user opt-in
+    let merged = { ...pref };
+    if (sessionPref) {
+      merged = {
+        ...merged,
+        listenMode: sessionPref.listenMode,
+        followupWindowMs: sessionPref.followupWindowMs,
+        meetingTranscribe: sessionPref.meetingTranscribe,
+        // intentionally NOT overriding injectMemories here
+        activationRegex: sessionPref.activationRegex,
+        activationSensitivity: sessionPref.activationSensitivity,
+        mute: sessionPref.mute,
+        dndQuietHoursStart: sessionPref.dndQuietHoursStart,
+        dndQuietHoursEnd: sessionPref.dndQuietHoursEnd
+      };
+    }
     const regex = buildActivationRegex(merged.activationRegex);
     return { pref: merged, regex };
   }
