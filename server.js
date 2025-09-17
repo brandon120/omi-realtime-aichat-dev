@@ -5,7 +5,7 @@ require('dotenv').config();
 const cookieParser = require('cookie-parser');
 const argon2 = require('argon2');
 const crypto = require('crypto');
-const { ENABLE_CONTEXT_ACTIVATION, ENABLE_NEW_OMI_ROUTES, ENABLE_PROMPT_WORKERS, QUIET_HOURS_ENABLED } = require('./featureFlags');
+const { ENABLE_CONTEXT_ACTIVATION, ENABLE_NEW_OMI_ROUTES, ENABLE_PROMPT_WORKERS, QUIET_HOURS_ENABLED, SEND_TYPED_OMI_NOTIFICATIONS } = require('./featureFlags');
  
 const ENABLE_USER_SYSTEM = String(process.env.ENABLE_USER_SYSTEM || 'false').toLowerCase() === 'true';
 let prisma = null;
@@ -266,37 +266,40 @@ if (ENABLE_USER_SYSTEM) {
 
       const responseText = await formatTypedMessageWithLabelsAndFooter(req.user.id, assistantText);
 
-      // Send OMI notification with the assistant answer (best-effort)
-      try {
-        // Persist notification event
-        const event = await prisma.notificationEvent.create({
-          data: { userId: req.user.id, channel: 'OMI', message: responseText, status: 'queued' }
-        });
-        let delivered = false;
-        let errorMessage = null;
+      // Optionally send OMI notification with the assistant answer (best-effort)
+      // Default behavior: disabled to avoid OMI API rate limits; rely on HTTP response instead
+      if (SEND_TYPED_OMI_NOTIFICATIONS && !prefs.mute) {
         try {
-          const links = await prisma.omiUserLink.findMany({ where: { userId: req.user.id, isVerified: true }, select: { omiUserId: true } });
-          if (links.length > 0) {
-            for (const link of links) {
-              try {
-                await sendOmiNotification(link.omiUserId, responseText);
-                delivered = true;
-                break;
-              } catch (e) {
-                errorMessage = e?.message || String(e);
+          // Persist notification event
+          const event = await prisma.notificationEvent.create({
+            data: { userId: req.user.id, channel: 'OMI', message: responseText, status: 'queued' }
+          });
+          let delivered = false;
+          let errorMessage = null;
+          try {
+            const links = await prisma.omiUserLink.findMany({ where: { userId: req.user.id, isVerified: true }, select: { omiUserId: true } });
+            if (links.length > 0) {
+              for (const link of links) {
+                try {
+                  await sendOmiNotification(link.omiUserId, responseText);
+                  delivered = true;
+                  break;
+                } catch (e) {
+                  errorMessage = e?.message || String(e);
+                }
               }
+            } else {
+              errorMessage = 'No verified OMI link';
             }
-          } else {
-            errorMessage = 'No verified OMI link';
+          } catch (e) {
+            errorMessage = e?.message || String(e);
           }
-        } catch (e) {
-          errorMessage = e?.message || String(e);
+          try {
+            await prisma.notificationEvent.update({ where: { id: event.id }, data: { status: delivered ? 'sent' : 'error', error: delivered ? null : errorMessage } });
+          } catch {}
+        } catch (notifyErr) {
+          console.warn('Failed to queue/send OMI notification for typed message:', notifyErr?.message || notifyErr);
         }
-        try {
-          await prisma.notificationEvent.update({ where: { id: event.id }, data: { status: delivered ? 'sent' : 'error', error: delivered ? null : errorMessage } });
-        } catch {}
-      } catch (notifyErr) {
-        console.warn('Failed to queue/send OMI notification for typed message:', notifyErr?.message || notifyErr);
       }
       res.status(200).json({ ok: true, conversation_id: conversation.id, assistant_text: responseText });
     } catch (e) {
