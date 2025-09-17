@@ -101,6 +101,29 @@ export default function SettingsScreen() {
               <TouchableOpacity style={[styles.chip, prefs.meetingTranscribe && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ meetingTranscribe: !prefs.meetingTranscribe }); if (updated) setPrefs(updated); }}>
                 <Text style={[styles.chipText, prefs.meetingTranscribe && styles.chipTextActive]}>Meeting Transcribe</Text>
               </TouchableOpacity>
+              <TouchableOpacity style={[styles.chip, prefs.mute && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ mute: !prefs.mute }); if (updated) setPrefs(updated); }}>
+                <Text style={[styles.chipText, prefs.mute && styles.chipTextActive]}>Mute</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={{ height: 8 }} />
+            <View style={styles.row}>
+              <Text>Activation Regex</Text>
+              <TextInput style={styles.input} value={String(prefs.activationRegex || '')} onChangeText={async (v)=>{ const updated = await apiUpdatePreferences({ activationRegex: v }); if (updated) setPrefs(updated); }} placeholder="Custom regex (optional)" />
+            </View>
+            <View style={styles.rowButtons}>
+              {([-2,-1,0,1,2] as const).map((s)=> (
+                <TouchableOpacity key={s} style={[styles.chip, (prefs.activationSensitivity||0)===s && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ activationSensitivity: s }); if (updated) setPrefs(updated); }}>
+                  <Text style={[styles.chipText, (prefs.activationSensitivity||0)===s && styles.chipTextActive]}>Sens {s}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <View style={styles.row}>
+              <Text>Quiet Hours Start (HH:MM)</Text>
+              <TextInput style={styles.input} value={String(prefs.dndQuietHoursStart || '')} onChangeText={async (v)=>{ const updated = await apiUpdatePreferences({ dndQuietHoursStart: v }); if (updated) setPrefs(updated); }} placeholder="22:00" />
+            </View>
+            <View style={styles.row}>
+              <Text>Quiet Hours End (HH:MM)</Text>
+              <TextInput style={styles.input} value={String(prefs.dndQuietHoursEnd || '')} onChangeText={async (v)=>{ const updated = await apiUpdatePreferences({ dndQuietHoursEnd: v }); if (updated) setPrefs(updated); }} placeholder="07:00" />
             </View>
           </View>
         ) : (

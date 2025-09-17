@@ -306,6 +306,11 @@ export type Preferences = {
   meetingTranscribe: boolean;
   injectMemories: boolean;
   defaultConversationId?: string | null;
+  activationRegex?: string | null;
+  activationSensitivity?: number;
+  mute?: boolean;
+  dndQuietHoursStart?: string | null;
+  dndQuietHoursEnd?: string | null;
 };
 export async function apiGetPreferences(): Promise<Preferences | null> {
   const client = createApiClient();
@@ -324,10 +329,60 @@ export async function apiUpdatePreferences(update: Partial<Preferences>): Promis
     if (typeof update.meetingTranscribe === 'boolean') payload.meeting_transcribe = update.meetingTranscribe;
     if (typeof update.injectMemories === 'boolean') payload.inject_memories = update.injectMemories;
     if ('defaultConversationId' in update) payload.default_conversation_id = update.defaultConversationId;
+    if (typeof update.activationRegex === 'string') payload.activation_regex = update.activationRegex;
+    if (typeof update.activationSensitivity === 'number') payload.activation_sensitivity = update.activationSensitivity;
+    if (typeof update.mute === 'boolean') payload.mute = update.mute;
+    if (typeof update.dndQuietHoursStart === 'string') payload.dnd_quiet_hours_start = update.dndQuietHoursStart;
+    if (typeof update.dndQuietHoursEnd === 'string') payload.dnd_quiet_hours_end = update.dndQuietHoursEnd;
     const { data } = await client.patch('/preferences', payload);
     if (data && data.ok) return data.preferences as Preferences;
   } catch {}
   return null;
+}
+
+// New OMI/Realtime endpoints
+export type TranscriptSegment = { text: string; speaker?: string; speaker_id?: number; is_user?: boolean; start?: number; end?: number; segment_id?: string };
+export async function apiRealtimeTranscript(session_id: string, uid: string, segments: TranscriptSegment[]): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.post(`/realtime/transcripts?session_id=${encodeURIComponent(session_id)}&uid=${encodeURIComponent(uid)}`, segments);
+    return !!(data && data.ok);
+  } catch {
+    return false;
+  }
+}
+
+export type OmiConversationItem = { id: string; title?: string | null; status?: string | null; created_at?: string };
+export type OmiMemoryItem = { id: string; text: string; created_at?: string };
+
+export async function apiImportMemories(uid: string, memories: Array<{ text: string; source?: string }>): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.post('/omi/import/memories', { uid, memories });
+    return !!(data && data.ok);
+  } catch {
+    return false;
+  }
+}
+
+export async function apiListOmiConversations(uid: string, limit: number = 50, offset: number = 0, statuses?: string[]): Promise<OmiConversationItem[]> {
+  const client = createApiClient();
+  try {
+    const params: any = { uid, limit, offset };
+    if (statuses && statuses.length) params.statuses = statuses.join(',');
+    const { data } = await client.get('/omi/import/conversations', { params });
+    if (data && data.ok) return data.conversations || data.items || [];
+  } catch {}
+  return [];
+}
+
+export async function apiListOmiMemories(uid: string, limit: number = 50, offset: number = 0): Promise<OmiMemoryItem[]> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.get('/omi/import/memories', { params: { uid, limit, offset } });
+    if (data && data.ok) return data.memories || data.items || [];
+  } catch {}
+  return [];
 }
 
 // Memories
