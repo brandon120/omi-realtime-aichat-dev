@@ -384,3 +384,49 @@ For issues and questions:
 ---
 
 **Happy coding with Omi! 🎉**
+
+## Memory Ingestion via /omi-webhook
+
+Your backend now accepts full memory payloads and automatically saves them to the linked user's memories so they appear in the Expo app and are injected into AI context when the memory preference is enabled.
+
+- Endpoint: `POST /omi-webhook?uid=YOUR_OMI_USER_ID`
+- Auth: Not required by this endpoint itself, but `uid` must be linked and verified via Omi link flow
+- Body: Entire memory object as JSON
+
+Example request:
+
+```bash
+curl -X POST "https://your-app/omi-webhook?uid=user123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": 0,
+    "created_at": "2024-07-22T23:59:45.910559+00:00",
+    "started_at": "2024-07-21T22:34:43.384323+00:00",
+    "finished_at": "2024-07-21T22:35:43.384323+00:00",
+    "transcript_segments": [
+      { "text": "Segment text", "speaker": "SPEAKER_00", "speakerId": 0, "is_user": false, "start": 10.0, "end": 20.0 }
+    ],
+    "photos": [],
+    "structured": {
+      "title": "Conversation Title",
+      "overview": "Brief overview...",
+      "emoji": "🗣️",
+      "category": "personal",
+      "action_items": [ { "description": "Action item description", "completed": false } ],
+      "events": []
+    },
+    "apps_response": [ { "app_id": "app-id", "content": "App response content" } ],
+    "discarded": false
+  }'
+```
+
+Behavior:
+- Looks up `uid` in Omi links; requires verified link
+- Composes a concise memory text from `structured.title`, `structured.emoji`, `structured.overview`, plus up to two `structured.action_items` descriptions; falls back to concatenated `transcript_segments.text`
+- Deduplicates exact text for the same user within the past 12 hours
+- Skips saving if `discarded: true`
+- Returns `201 { ok: true, memory: { id, text, createdAt } }` on create; `200 { ok: true, deduped: true }` if duplicate; or `{ ok: true, ignored: true }` if empty
+
+Notes:
+- Saved memories appear in the Expo app under the Memories tab (`GET /memories`)
+- When the user preference `injectMemories` is enabled, recent memories are included in AI prompts for `/omi-webhook` processing

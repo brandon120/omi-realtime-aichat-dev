@@ -35,7 +35,76 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
 
   app.post('/omi-webhook', async (req, res) => {
     try {
-      const { session_id, segments } = req.body || {};
+      // Memory ingestion mode (payload includes full memory object and uid query)
+      const uid = req.query && req.query.uid ? String(req.query.uid) : null;
+      const body = req.body || {};
+      const isMemoryPayload = !!(uid && (Array.isArray(body.transcript_segments) || body.structured || typeof body.discarded !== 'undefined'));
+
+      async function composeMemoryText(payload) {
+        try {
+          const structured = payload.structured || {};
+          const emoji = structured.emoji ? String(structured.emoji).trim() : '';
+          const title = structured.title ? String(structured.title).trim() : '';
+          const overview = (structured.overview || payload.overview) ? String(structured.overview || payload.overview).trim() : '';
+          let line = '';
+          if (emoji && title) line = `${emoji} ${title}`;
+          else if (emoji) line = emoji;
+          else if (title) line = title;
+          let text = '';
+          if (line && overview) text = `${line}: ${overview}`;
+          else if (overview) text = overview;
+          else if (line) text = line;
+          if (!text) {
+            const segs = Array.isArray(payload.transcript_segments) ? payload.transcript_segments : [];
+            if (segs.length) {
+              const combined = segs
+                .map((s) => (typeof s.text === 'string' ? s.text.trim() : ''))
+                .filter(Boolean)
+                .join(' ')
+                .trim();
+              text = combined;
+            }
+          }
+          const actions = Array.isArray(structured.action_items) ? structured.action_items : [];
+          const actionLines = actions
+            .map((a) => (a && a.description ? String(a.description).trim() : ''))
+            .filter(Boolean);
+          if (actionLines.length) {
+            const suffix = ` Action: ${actionLines.slice(0, 2).join('; ')}`;
+            text = text ? `${text}${suffix}` : suffix;
+          }
+          text = String(text || '').replace(/\s+/g, ' ').trim();
+          if (text.length > 500) text = text.slice(0, 497) + '...';
+          return text;
+        } catch {
+          return '';
+        }
+      }
+
+      if (isMemoryPayload) {
+        if (!(ENABLE_USER_SYSTEM && prisma)) return res.status(503).json({ error: 'User system disabled' });
+        try {
+          if (body && body.discarded === true) return res.status(200).json({ ok: true, ignored: true, discarded: true });
+          const link = await prisma.omiUserLink.findUnique({ where: { omiUserId: uid } });
+          if (!link || !link.isVerified) return res.status(404).json({ error: 'uid not linked to a verified user' });
+          const userId = link.userId;
+          const memText = (await composeMemoryText(body)).trim();
+          if (!memText) return res.status(200).json({ ok: true, ignored: true });
+          // Deduplicate within recent window
+          const since = new Date(Date.now() - 12 * 60 * 60 * 1000);
+          const dupe = await prisma.memory.findFirst({ where: { userId, text: memText, createdAt: { gt: since } } });
+          if (dupe) {
+            return res.status(200).json({ ok: true, deduped: true, memory: { id: dupe.id, text: dupe.text, createdAt: dupe.createdAt } });
+          }
+          const saved = await prisma.memory.create({ data: { userId, text: memText } });
+          return res.status(201).json({ ok: true, memory: { id: saved.id, text: saved.text, createdAt: saved.createdAt } });
+        } catch (e) {
+          return res.status(500).json({ error: 'Failed to save memory' });
+        }
+      }
+
+      // Transcript mode (existing behavior)
+      const { session_id, segments } = body;
       if (!session_id || !Array.isArray(segments)) return res.status(400).json({ error: 'session_id and segments[] required' });
 
       // Persist segments immediately for idempotency
