@@ -142,7 +142,10 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
         const endSignal = Boolean(req.body?.end || req.body?.final || req.body?.is_final) ||
           segments.some((s) => s?.end === true || s?.final === true || s?.is_final === true || s?.is_last_segment === true || s?.segment_type === 'end');
         if (!endSignal) return res.status(200).json({});
-        return res.status(200).json({ message: 'Meeting transcribed and saved.' });
+        const instructionsText = 'Ask questions naturally or use "Hey Omi" to be explicit.';
+        const helpMessage = 'You can talk to me naturally! Try asking questions or giving commands.';
+        const aiResponse = 'Meeting transcribed and saved.';
+        return res.status(200).json({ message: aiResponse, help_response: helpMessage, instructions: instructionsText });
       }
 
       if (QUIET_HOURS_ENABLED && withinQuietHours(pref)) {
@@ -280,7 +283,9 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
         })();
       }
 
-      return res.status(200).json({ message: aiResponse });
+      const instructionsText = 'Ask questions naturally or use "Hey Omi" to be explicit.';
+      const helpMessage = 'You can talk to me naturally! Try asking questions or giving commands.';
+      return res.status(200).json({ message: aiResponse, help_response: helpMessage, instructions: instructionsText });
     } catch (e) {
       return res.status(500).json({ error: 'Webhook processing failed' });
     }
