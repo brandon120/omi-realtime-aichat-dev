@@ -1,11 +1,15 @@
 import React, { useEffect, useState } from 'react';
-import { StyleSheet, View, Text, Button, TextInput, Alert, ScrollView, TouchableOpacity } from 'react-native';
+import { StyleSheet, View, Text, Button, TextInput, Alert, ScrollView, TouchableOpacity, useWindowDimensions } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ThemedView, ThemedText } from '@/components/Themed';
 import { apiMe, apiStartOmiLink, apiConfirmOmiLink, apiGetPreferences, apiUpdatePreferences, type Preferences } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 
 export default function SettingsScreen() {
   const { logout } = useAuth();
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const isSmall = width <= 375;
   const [omiUserId, setOmiUserId] = useState<string>('');
   const [code, setCode] = useState<string>('');
   const [me, setMe] = useState<any>(null);
@@ -54,13 +58,13 @@ export default function SettingsScreen() {
   }, []);
 
   return (
-    <ThemedView style={styles.container}>
-      <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+    <ThemedView style={[styles.container, isSmall && { padding: 12 }]}>
+      <ScrollView contentContainerStyle={{ paddingBottom: 12 + Math.max(insets.bottom, 12) }}>
         <ThemedText type="title">Settings</ThemedText>
 
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Account</Text>
-          <View style={styles.rowButtons}>
+          <View style={[styles.rowButtons, isSmall && { gap: 6 }]}>
             <TouchableOpacity style={styles.primaryBtn} onPress={refreshProfile}><Text style={styles.btnText}>Refresh Profile</Text></TouchableOpacity>
             <TouchableOpacity style={styles.dangerBtn} onPress={logout}><Text style={styles.btnText}>Sign out</Text></TouchableOpacity>
           </View>
@@ -79,17 +83,17 @@ export default function SettingsScreen() {
           <Text style={styles.sectionTitle}>Link Omi Account</Text>
           <View style={styles.field}>
             <Text style={styles.label}>Omi User ID</Text>
-            <TextInput style={styles.input} value={omiUserId} onChangeText={setOmiUserId} placeholder="omi_user_id" />
+            <TextInput style={[styles.input, isSmall && { paddingVertical: 8 }]} value={omiUserId} onChangeText={setOmiUserId} placeholder="omi_user_id" />
           </View>
-          <View style={styles.rowButtons}>
+          <View style={[styles.rowButtons, isSmall && { gap: 6 }]}>
             <TouchableOpacity style={styles.primaryBtn} onPress={startLink}><Text style={styles.btnText}>Start Linking</Text></TouchableOpacity>
           </View>
           {devCode ? <Text selectable style={{ marginTop: 6 }}>Dev Code: {devCode}</Text> : null}
           <View style={styles.field}>
             <Text style={styles.label}>Verification Code</Text>
-            <TextInput style={styles.input} value={code} onChangeText={setCode} placeholder="123456" />
+            <TextInput style={[styles.input, isSmall && { paddingVertical: 8 }]} value={code} onChangeText={setCode} placeholder="123456" />
           </View>
-          <View style={styles.rowButtons}>
+          <View style={[styles.rowButtons, isSmall && { gap: 6 }]}>
             <TouchableOpacity style={styles.successBtn} onPress={confirmLink}><Text style={styles.btnText}>Confirm Code</Text></TouchableOpacity>
           </View>
         </View>
@@ -101,14 +105,14 @@ export default function SettingsScreen() {
           <>
             <View style={styles.card}>
               <Text style={styles.sectionTitle}>AI Behavior</Text>
-              <View style={styles.rowButtons}>
+              <View style={[styles.rowButtons, isSmall && { gap: 6 }]}>
                 {(['TRIGGER','FOLLOWUP','ALWAYS'] as const).map((mode) => (
                   <TouchableOpacity key={mode} style={[styles.chip, prefs.listenMode===mode && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ listenMode: mode }); if (updated) setPrefs(updated); }}>
                     <Text style={[styles.chipText, prefs.listenMode===mode && styles.chipTextActive]}>{mode}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
-              <View style={styles.rowButtons}>
+              <View style={[styles.rowButtons, isSmall && { gap: 6 }]}>
                 <TouchableOpacity style={[styles.chip, prefs.injectMemories && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ injectMemories: !prefs.injectMemories }); if (updated) setPrefs(updated); }}>
                   <Text style={[styles.chipText, prefs.injectMemories && styles.chipTextActive]}>Memories</Text>
                 </TouchableOpacity>
@@ -125,7 +129,7 @@ export default function SettingsScreen() {
               <Text style={styles.sectionTitle}>Activation</Text>
               <View style={styles.field}>
                 <Text style={styles.label}>Activation Regex</Text>
-                <TextInput style={styles.input} value={String(prefs.activationRegex || '')} onChangeText={async (v: string)=>{ const updated = await apiUpdatePreferences({ activationRegex: v }); if (updated) setPrefs(updated); }} placeholder="Custom regex (optional)" />
+                <TextInput style={[styles.input, isSmall && { paddingVertical: 8 }]} value={String(prefs.activationRegex || '')} onChangeText={async (v: string)=>{ const updated = await apiUpdatePreferences({ activationRegex: v }); if (updated) setPrefs(updated); }} placeholder="Custom regex (optional)" />
               </View>
               <View style={styles.rowButtons}>
                 {([-2,-1,0,1,2] as const).map((s)=> (
@@ -141,11 +145,11 @@ export default function SettingsScreen() {
               <View style={styles.rowHorizontal}>
                 <View style={styles.fieldCol}>
                   <Text style={styles.label}>Start (HH:MM)</Text>
-                  <TextInput style={styles.input} value={String(prefs.dndQuietHoursStart || '')} onChangeText={async (v: string)=>{ const updated = await apiUpdatePreferences({ dndQuietHoursStart: v }); if (updated) setPrefs(updated); }} placeholder="22:00" />
+                  <TextInput style={[styles.input, isSmall && { paddingVertical: 8 }]} value={String(prefs.dndQuietHoursStart || '')} onChangeText={async (v: string)=>{ const updated = await apiUpdatePreferences({ dndQuietHoursStart: v }); if (updated) setPrefs(updated); }} placeholder="22:00" />
                 </View>
                 <View style={styles.fieldCol}>
                   <Text style={styles.label}>End (HH:MM)</Text>
-                  <TextInput style={styles.input} value={String(prefs.dndQuietHoursEnd || '')} onChangeText={async (v: string)=>{ const updated = await apiUpdatePreferences({ dndQuietHoursEnd: v }); if (updated) setPrefs(updated); }} placeholder="07:00" />
+                  <TextInput style={[styles.input, isSmall && { paddingVertical: 8 }]} value={String(prefs.dndQuietHoursEnd || '')} onChangeText={async (v: string)=>{ const updated = await apiUpdatePreferences({ dndQuietHoursEnd: v }); if (updated) setPrefs(updated); }} placeholder="07:00" />
                 </View>
               </View>
             </View>

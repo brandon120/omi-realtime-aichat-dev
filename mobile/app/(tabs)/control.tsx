@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, TextInput, FlatList, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, TextInput, FlatList, ActivityIndicator, KeyboardAvoidingView, Platform, useWindowDimensions, NativeSyntheticEvent, NativeScrollEvent } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ThemedView } from '@/components/Themed';
 import { useAuth } from '@/contexts/AuthContext';
 import {
@@ -22,6 +23,8 @@ type MessageState = {
 
 export default function ChatScreen() {
   const { user } = useAuth();
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<MessageState>({ byConversationId: {} });
   const [input, setInput] = useState<string>('');
@@ -30,6 +33,10 @@ export default function ChatScreen() {
   const [hasOmiLink, setHasOmiLink] = useState<boolean>(true);
   const listRef = useRef<FlatList<MessageItem> | null>(null);
   const windowsPollRef = useRef<any>(null);
+  const isSmall = width <= 375; // iPhone SE width
+  const [isAtBottom, setIsAtBottom] = useState<boolean>(true);
+  const loadingOlderRef = useRef<boolean>(false);
+  const [olderLoading, setOlderLoading] = useState<boolean>(false);
 
   const selectedMessages = useMemo(() => {
     if (!selectedId) return [] as MessageItem[];
@@ -50,20 +57,59 @@ export default function ChatScreen() {
     } catch {}
   }
 
-  async function loadMessages(conversationId: string) {
+  // Load the newest page and merge in any new items (limit 20)
+  async function loadLatest(conversationId: string, opts?: { reset?: boolean }) {
     setMessages((prev: MessageState) => ({
       byConversationId: {
         ...prev.byConversationId,
-        [conversationId]: { items: prev.byConversationId[conversationId]?.items || [], nextCursor: prev.byConversationId[conversationId]?.nextCursor || null, loading: true }
+        [conversationId]: {
+          items: prev.byConversationId[conversationId]?.items || [],
+          nextCursor: prev.byConversationId[conversationId]?.nextCursor || null,
+          loading: true
+        }
       }
     }));
-    const res = await apiListMessages(conversationId, 100);
-    setMessages((prev: MessageState) => ({
-      byConversationId: {
-        ...prev.byConversationId,
-        [conversationId]: { items: res.items, nextCursor: res.nextCursor, loading: false }
-      }
-    }));
+    const res = await apiListMessages(conversationId, 20);
+    setMessages((prev: MessageState) => {
+      const existing = opts?.reset ? [] : (prev.byConversationId[conversationId]?.items || []);
+      const map = new Map<string, MessageItem>();
+      [...existing, ...res.items].forEach((m) => map.set(m.id, m));
+      const merged = Array.from(map.values());
+      return {
+        byConversationId: {
+          ...prev.byConversationId,
+          [conversationId]: { items: merged, nextCursor: res.nextCursor, loading: false }
+        }
+      };
+    });
+  }
+
+  // Load older messages and prepend to existing list
+  async function loadOlder(conversationId: string) {
+    if (loadingOlderRef.current) return;
+    const entry = messages.byConversationId[conversationId];
+    const cursor = entry?.nextCursor;
+    if (!cursor) return;
+    loadingOlderRef.current = true;
+    setOlderLoading(true);
+    try {
+      const res = await apiListMessages(conversationId, 20, cursor);
+      setMessages((prev: MessageState) => {
+        const current = prev.byConversationId[conversationId]?.items || [];
+        const map = new Map<string, MessageItem>();
+        [...res.items, ...current].forEach((m) => map.set(m.id, m));
+        const merged = Array.from(map.values());
+        return {
+          byConversationId: {
+            ...prev.byConversationId,
+            [conversationId]: { items: merged, nextCursor: res.nextCursor, loading: false }
+          }
+        };
+      });
+    } finally {
+      loadingOlderRef.current = false;
+      setOlderLoading(false);
+    }
   }
 
   useEffect(() => { 
@@ -80,10 +126,11 @@ export default function ChatScreen() {
 
   useEffect(() => {
     if (!selectedId) return;
-    loadMessages(selectedId);
+    loadLatest(selectedId, { reset: true });
     if (pollingRef.current) clearInterval(pollingRef.current);
     pollingRef.current = setInterval(() => {
-      loadMessages(selectedId);
+      // Poll only the latest page and merge in
+      loadLatest(selectedId);
     }, 5000);
     return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
   }, [selectedId]);
@@ -102,11 +149,11 @@ export default function ChatScreen() {
   };
 
   useEffect(() => {
-    // Auto-scroll when switching chats or when new messages arrive
+    // Auto-scroll only when switching chats
     if (!selectedId) return;
     const timer = setTimeout(() => scrollToBottom(true), 50);
     return () => clearTimeout(timer);
-  }, [selectedId, selectedMessages.length]);
+  }, [selectedId]);
 
   const onSend = useCallback(async () => {
     const text = input.trim();
@@ -169,14 +216,14 @@ export default function ChatScreen() {
       }
     }));
     setInput('');
-    // Keep view pinned to newest message
+    // Keep view pinned to newest message when user sends
     scrollToBottom(false);
 
     const res = await apiSendMessage({ conversation_id: selectedId, text });
     setSending(false);
     if (!res) return;
     // Refresh messages to include assistant response
-    await loadMessages(selectedId);
+    await loadLatest(selectedId);
   }, [input, sending, selectedId]);
 
   const renderMessage = ({ item }: { item: MessageItem }) => {
@@ -192,11 +239,21 @@ export default function ChatScreen() {
 
   const selectedLoading = selectedId ? messages.byConversationId[selectedId]?.loading : false;
 
+  const onListScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, layoutMeasurement, contentSize } = e.nativeEvent;
+    const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
+    setIsAtBottom(distanceFromBottom < 80);
+    // Auto-load older when near top
+    if (contentOffset.y <= 24 && selectedId && !loadingOlderRef.current && messages.byConversationId[selectedId]?.nextCursor) {
+      loadOlder(selectedId);
+    }
+  }, [selectedId, messages]);
+
   return (
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={Platform.OS === 'ios' ? (insets.bottom + 50) : 0}>
       <ThemedView style={styles.containerMobile}>
         <View style={styles.headerBar}>
-          <Text style={styles.headerTitle}>Chat</Text>
+          <Text style={[styles.headerTitle, isSmall && { fontSize: 18 }]}>Chat</Text>
         </View>
         {!hasOmiLink ? (
           <View style={styles.banner}>
@@ -213,19 +270,27 @@ export default function ChatScreen() {
             <FlatList<MessageItem>
               ref={listRef}
               style={styles.messageList}
-              contentContainerStyle={{ padding: 12 }}
+              contentContainerStyle={{ padding: 12, paddingBottom: 12 + Math.max(insets.bottom, 8) }}
               data={selectedMessages}
               renderItem={renderMessage}
               keyExtractor={(m: MessageItem) => m.id}
-              onContentSizeChange={() => scrollToBottom(true)}
+              onContentSizeChange={() => { if (isAtBottom) scrollToBottom(true); }}
+              onScroll={onListScroll}
+              scrollEventThrottle={16}
+              keyboardShouldPersistTaps="handled"
+              maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+              ListHeaderComponent={() => (messages.byConversationId[selectedId!]?.nextCursor ? (
+                <View style={{ paddingVertical: 8 }}>{olderLoading ? <ActivityIndicator /> : null}</View>
+              ) : null)}
             />
-            <View style={styles.inputRow}>
+            <View style={[styles.inputRow, { paddingBottom: 8 + Math.max(insets.bottom, 0) }]}>
               <TextInput
-                style={styles.textInput}
+                style={[styles.textInput, isSmall && { minHeight: 36, paddingVertical: 6 }]}
                 placeholder="Type a message or /notify ..."
                 value={input}
                 onChangeText={setInput}
                 multiline
+                onFocus={() => setTimeout(() => scrollToBottom(true), 50)}
               />
               <TouchableOpacity style={styles.sendBtn} onPress={onSend} disabled={sending || !input.trim()}>
                 <Text style={styles.sendBtnText}>{sending ? '...' : 'Send'}</Text>
