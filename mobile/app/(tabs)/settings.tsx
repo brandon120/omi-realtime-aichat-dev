@@ -57,75 +57,99 @@ export default function SettingsScreen() {
     <ThemedView style={styles.container}>
       <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
         <ThemedText type="title">Settings</ThemedText>
-        <View style={styles.rowButtons}>
-          <TouchableOpacity style={styles.primaryBtn} onPress={refreshProfile}><Text style={styles.btnText}>Refresh Profile</Text></TouchableOpacity>
-          <TouchableOpacity style={styles.dangerBtn} onPress={logout}><Text style={styles.btnText}>Sign out</Text></TouchableOpacity>
+
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Account</Text>
+          <View style={styles.rowButtons}>
+            <TouchableOpacity style={styles.primaryBtn} onPress={refreshProfile}><Text style={styles.btnText}>Refresh Profile</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.dangerBtn} onPress={logout}><Text style={styles.btnText}>Sign out</Text></TouchableOpacity>
+          </View>
         </View>
+
         {me ? (
           <View style={styles.card}>
-            <Text selectable>{JSON.stringify(me, null, 2)}</Text>
+            <Text style={styles.sectionTitle}>Profile</Text>
+            <View style={{ borderWidth: 1, borderColor: '#eee', borderRadius: 8, padding: 8, backgroundColor: '#fafafa' }}>
+              <Text selectable>{JSON.stringify(me, null, 2)}</Text>
+            </View>
           </View>
         ) : null}
-        <View style={{ height: 16 }} />
-        <ThemedText type="subtitle">Link Omi Account</ThemedText>
-        <View style={styles.row}>
-          <Text>Omi User ID</Text>
-          <TextInput style={styles.input} value={omiUserId} onChangeText={setOmiUserId} placeholder="omi_user_id" />
-        </View>
-        <TouchableOpacity style={styles.primaryBtn} onPress={startLink}><Text style={styles.btnText}>Start Linking</Text></TouchableOpacity>
-        {devCode ? <Text selectable style={{ marginTop: 6 }}>Dev Code: {devCode}</Text> : null}
-        <View style={styles.row}>
-          <Text>Verification Code</Text>
-          <TextInput style={styles.input} value={code} onChangeText={setCode} placeholder="123456" />
-        </View>
-        <TouchableOpacity style={styles.successBtn} onPress={confirmLink}><Text style={styles.btnText}>Confirm Code</Text></TouchableOpacity>
 
-        <View style={{ height: 24 }} />
-        <ThemedText type="subtitle">Preferences</ThemedText>
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Link Omi Account</Text>
+          <View style={styles.field}>
+            <Text style={styles.label}>Omi User ID</Text>
+            <TextInput style={styles.input} value={omiUserId} onChangeText={setOmiUserId} placeholder="omi_user_id" />
+          </View>
+          <View style={styles.rowButtons}>
+            <TouchableOpacity style={styles.primaryBtn} onPress={startLink}><Text style={styles.btnText}>Start Linking</Text></TouchableOpacity>
+          </View>
+          {devCode ? <Text selectable style={{ marginTop: 6 }}>Dev Code: {devCode}</Text> : null}
+          <View style={styles.field}>
+            <Text style={styles.label}>Verification Code</Text>
+            <TextInput style={styles.input} value={code} onChangeText={setCode} placeholder="123456" />
+          </View>
+          <View style={styles.rowButtons}>
+            <TouchableOpacity style={styles.successBtn} onPress={confirmLink}><Text style={styles.btnText}>Confirm Code</Text></TouchableOpacity>
+          </View>
+        </View>
+
+        <Text style={[styles.sectionTitle, { marginBottom: 8 }]}>Preferences</Text>
         {prefsLoading ? (
           <Text>Loading preferences...</Text>
         ) : prefs ? (
-          <View style={styles.card}>
-            <View style={styles.rowButtons}>
-              {(['TRIGGER','FOLLOWUP','ALWAYS'] as const).map((mode) => (
-                <TouchableOpacity key={mode} style={[styles.chip, prefs.listenMode===mode && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ listenMode: mode }); if (updated) setPrefs(updated); }}>
-                  <Text style={[styles.chipText, prefs.listenMode===mode && styles.chipTextActive]}>{mode}</Text>
+          <>
+            <View style={styles.card}>
+              <Text style={styles.sectionTitle}>AI Behavior</Text>
+              <View style={styles.rowButtons}>
+                {(['TRIGGER','FOLLOWUP','ALWAYS'] as const).map((mode) => (
+                  <TouchableOpacity key={mode} style={[styles.chip, prefs.listenMode===mode && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ listenMode: mode }); if (updated) setPrefs(updated); }}>
+                    <Text style={[styles.chipText, prefs.listenMode===mode && styles.chipTextActive]}>{mode}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <View style={styles.rowButtons}>
+                <TouchableOpacity style={[styles.chip, prefs.injectMemories && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ injectMemories: !prefs.injectMemories }); if (updated) setPrefs(updated); }}>
+                  <Text style={[styles.chipText, prefs.injectMemories && styles.chipTextActive]}>Memories</Text>
                 </TouchableOpacity>
-              ))}
-            </View>
-            <View style={{ height: 8 }} />
-            <View style={styles.rowButtons}>
-              <TouchableOpacity style={[styles.chip, prefs.injectMemories && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ injectMemories: !prefs.injectMemories }); if (updated) setPrefs(updated); }}>
-                <Text style={[styles.chipText, prefs.injectMemories && styles.chipTextActive]}>Memories</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.chip, prefs.meetingTranscribe && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ meetingTranscribe: !prefs.meetingTranscribe }); if (updated) setPrefs(updated); }}>
-                <Text style={[styles.chipText, prefs.meetingTranscribe && styles.chipTextActive]}>Meeting Transcribe</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.chip, prefs.mute && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ mute: !prefs.mute }); if (updated) setPrefs(updated); }}>
-                <Text style={[styles.chipText, prefs.mute && styles.chipTextActive]}>Mute</Text>
-              </TouchableOpacity>
-            </View>
-            <View style={{ height: 8 }} />
-            <View style={styles.row}>
-              <Text>Activation Regex</Text>
-              <TextInput style={styles.input} value={String(prefs.activationRegex || '')} onChangeText={async (v)=>{ const updated = await apiUpdatePreferences({ activationRegex: v }); if (updated) setPrefs(updated); }} placeholder="Custom regex (optional)" />
-            </View>
-            <View style={styles.rowButtons}>
-              {([-2,-1,0,1,2] as const).map((s)=> (
-                <TouchableOpacity key={s} style={[styles.chip, (prefs.activationSensitivity||0)===s && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ activationSensitivity: s }); if (updated) setPrefs(updated); }}>
-                  <Text style={[styles.chipText, (prefs.activationSensitivity||0)===s && styles.chipTextActive]}>Sens {s}</Text>
+                <TouchableOpacity style={[styles.chip, prefs.meetingTranscribe && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ meetingTranscribe: !prefs.meetingTranscribe }); if (updated) setPrefs(updated); }}>
+                  <Text style={[styles.chipText, prefs.meetingTranscribe && styles.chipTextActive]}>Meeting Transcribe</Text>
                 </TouchableOpacity>
-              ))}
+                <TouchableOpacity style={[styles.chip, prefs.mute && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ mute: !prefs.mute }); if (updated) setPrefs(updated); }}>
+                  <Text style={[styles.chipText, prefs.mute && styles.chipTextActive]}>Mute</Text>
+                </TouchableOpacity>
+              </View>
             </View>
-            <View style={styles.row}>
-              <Text>Quiet Hours Start (HH:MM)</Text>
-              <TextInput style={styles.input} value={String(prefs.dndQuietHoursStart || '')} onChangeText={async (v)=>{ const updated = await apiUpdatePreferences({ dndQuietHoursStart: v }); if (updated) setPrefs(updated); }} placeholder="22:00" />
+
+            <View style={styles.card}>
+              <Text style={styles.sectionTitle}>Activation</Text>
+              <View style={styles.field}>
+                <Text style={styles.label}>Activation Regex</Text>
+                <TextInput style={styles.input} value={String(prefs.activationRegex || '')} onChangeText={async (v: string)=>{ const updated = await apiUpdatePreferences({ activationRegex: v }); if (updated) setPrefs(updated); }} placeholder="Custom regex (optional)" />
+              </View>
+              <View style={styles.rowButtons}>
+                {([-2,-1,0,1,2] as const).map((s)=> (
+                  <TouchableOpacity key={s} style={[styles.chip, (prefs.activationSensitivity||0)===s && styles.chipActive]} onPress={async ()=>{ const updated = await apiUpdatePreferences({ activationSensitivity: s }); if (updated) setPrefs(updated); }}>
+                    <Text style={[styles.chipText, (prefs.activationSensitivity||0)===s && styles.chipTextActive]}>Sens {s}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
             </View>
-            <View style={styles.row}>
-              <Text>Quiet Hours End (HH:MM)</Text>
-              <TextInput style={styles.input} value={String(prefs.dndQuietHoursEnd || '')} onChangeText={async (v)=>{ const updated = await apiUpdatePreferences({ dndQuietHoursEnd: v }); if (updated) setPrefs(updated); }} placeholder="07:00" />
+
+            <View style={styles.card}>
+              <Text style={styles.sectionTitle}>Quiet Hours</Text>
+              <View style={styles.rowHorizontal}>
+                <View style={styles.fieldCol}>
+                  <Text style={styles.label}>Start (HH:MM)</Text>
+                  <TextInput style={styles.input} value={String(prefs.dndQuietHoursStart || '')} onChangeText={async (v: string)=>{ const updated = await apiUpdatePreferences({ dndQuietHoursStart: v }); if (updated) setPrefs(updated); }} placeholder="22:00" />
+                </View>
+                <View style={styles.fieldCol}>
+                  <Text style={styles.label}>End (HH:MM)</Text>
+                  <TextInput style={styles.input} value={String(prefs.dndQuietHoursEnd || '')} onChangeText={async (v: string)=>{ const updated = await apiUpdatePreferences({ dndQuietHoursEnd: v }); if (updated) setPrefs(updated); }} placeholder="07:00" />
+                </View>
+              </View>
             </View>
-          </View>
+          </>
         ) : (
           <Text>Preferences unavailable.</Text>
         )}
@@ -137,6 +161,10 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 16, gap: 16 },
   row: { gap: 8 },
+  rowHorizontal: { flexDirection: 'row', gap: 12 },
+  field: { gap: 6 },
+  fieldCol: { flex: 1 },
+  label: { color: '#333' },
   input: {
     borderWidth: 1,
     borderColor: '#ccc',
@@ -153,6 +181,7 @@ const styles = StyleSheet.create({
   successBtn: { backgroundColor: '#28a745', paddingHorizontal: 16, paddingVertical: 12, borderRadius: 8 },
   dangerBtn: { backgroundColor: '#dc3545', paddingHorizontal: 16, paddingVertical: 12, borderRadius: 8 },
   btnText: { color: '#fff', fontWeight: '700' },
-  card: { borderWidth: 1, borderColor: '#eee', backgroundColor: '#fff', borderRadius: 8, padding: 12 },
+  card: { borderWidth: 1, borderColor: '#eee', backgroundColor: '#fff', borderRadius: 8, padding: 12, gap: 8 },
+  sectionTitle: { fontWeight: '700', fontSize: 16 },
 });
 

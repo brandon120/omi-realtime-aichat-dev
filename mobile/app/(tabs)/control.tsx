@@ -45,6 +45,7 @@ export default function ChatScreen() {
   const [showOverlayList, setShowOverlayList] = useState<boolean>(false);
   const convosPollRef = useRef<any>(null);
   const [prefs, setPrefs] = useState<Preferences | null>(null);
+  const listRef = useRef<FlatList<MessageItem> | null>(null);
 
   const selectedMessages = useMemo(() => {
     if (!selectedId) return [] as MessageItem[];
@@ -56,31 +57,36 @@ export default function ChatScreen() {
     setConvos((prev: ConversationState) => ({ ...prev, loading: true }));
     const res = await apiListConversations(20);
     let items = res.items;
-    // Prefer currently active window's conversation if present
+    // Prefer currently active window's conversation only when nothing is selected yet
     try {
       const windows = await apiListWindows();
       const active = windows.find((w: any) => w.isActive && w.conversationId);
       const activeId = active?.conversationId || null;
-      if (activeId && items.some((i) => i.id === activeId)) {
-        setSelectedId(activeId);
-      } else if (!selectedId && items.length > 0) {
-        // Try default conversation from preferences
-        try {
-          const prefsLatest = await apiGetPreferences();
-          if (prefsLatest?.defaultConversationId && items.some((i)=>i.id===prefsLatest.defaultConversationId)) {
-            setSelectedId(prefsLatest.defaultConversationId);
-          } else {
-            setSelectedId(items[0].id);
-          }
-        } catch {
-          setSelectedId(items[0].id);
-        }
-      }
       if (activeId && !items.some((i: ConversationItem) => i.id === activeId)) {
         try {
           const c = await apiGetConversation(activeId);
           if (c) items = [c, ...items];
         } catch {}
+      }
+
+      const currentSelectedId = selectedId;
+      const selectedStillExists = currentSelectedId ? items.some((i: ConversationItem) => i.id === currentSelectedId) : false;
+
+      if (!currentSelectedId || !selectedStillExists) {
+        // Establish a sensible default without overriding user's explicit selection
+        let nextId: string | null = null;
+        if (activeId && items.some((i: ConversationItem) => i.id === activeId)) {
+          nextId = activeId;
+        } else {
+          try {
+            const prefsLatest = await apiGetPreferences();
+            if (prefsLatest?.defaultConversationId && items.some((i: ConversationItem) => i.id === prefsLatest.defaultConversationId)) {
+              nextId = prefsLatest.defaultConversationId;
+            }
+          } catch {}
+          if (!nextId && items.length > 0) nextId = items[0].id;
+        }
+        if (nextId) setSelectedId(nextId);
       }
     } catch {
       if (!selectedId && res.items.length > 0) setSelectedId(res.items[0].id);
@@ -114,7 +120,7 @@ export default function ChatScreen() {
       if (p) setPrefs(p);
     })();
     if (convosPollRef.current) clearInterval(convosPollRef.current);
-    convosPollRef.current = setInterval(loadConversations, 5000);
+    convosPollRef.current = setInterval(loadConversations, 10000);
     return () => { if (convosPollRef.current) clearInterval(convosPollRef.current); };
   }, []);
 
@@ -124,9 +130,29 @@ export default function ChatScreen() {
     if (pollingRef.current) clearInterval(pollingRef.current);
     pollingRef.current = setInterval(() => {
       loadMessages(selectedId);
-    }, 3000);
+    }, 5000);
     return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
   }, [selectedId]);
+
+  const scrollToBottom = (animated: boolean = true) => {
+    try {
+      const refAny: any = listRef.current as any;
+      if (!refAny) return;
+      if (typeof refAny.scrollToEnd === 'function') {
+        refAny.scrollToEnd({ animated });
+      } else if (typeof refAny.scrollToIndex === 'function') {
+        const count = selectedMessages.length;
+        if (count > 0) refAny.scrollToIndex({ index: count - 1, animated });
+      }
+    } catch {}
+  };
+
+  useEffect(() => {
+    // Auto-scroll when switching chats or when new messages arrive
+    if (!selectedId) return;
+    const timer = setTimeout(() => scrollToBottom(true), 50);
+    return () => clearTimeout(timer);
+  }, [selectedId, selectedMessages.length]);
 
   const onSend = useCallback(async () => {
     const text = input.trim();
@@ -189,6 +215,8 @@ export default function ChatScreen() {
       }
     }));
     setInput('');
+    // Keep view pinned to newest message
+    scrollToBottom(false);
 
     const res = await apiSendMessage({ conversation_id: selectedId, text });
     setSending(false);
@@ -306,11 +334,13 @@ export default function ChatScreen() {
             ) : (
               <>
                 <FlatList<MessageItem>
+                  ref={listRef}
                   style={styles.messageList}
                   contentContainerStyle={{ padding: 12 }}
                   data={selectedMessages}
                   renderItem={renderMessage}
                   keyExtractor={(m: MessageItem) => m.id}
+                  onContentSizeChange={() => scrollToBottom(true)}
                 />
                 <View style={styles.inputRow}>
                   <TextInput
@@ -375,11 +405,13 @@ export default function ChatScreen() {
             ) : (
               <>
                 <FlatList<MessageItem>
+                  ref={listRef}
                   style={styles.messageList}
                   contentContainerStyle={{ padding: 12 }}
                   data={selectedMessages}
                   renderItem={renderMessage}
                   keyExtractor={(m: MessageItem) => m.id}
+                  onContentSizeChange={() => scrollToBottom(true)}
                 />
                 <View style={styles.inputRow}>
                   <TextInput
@@ -444,11 +476,13 @@ export default function ChatScreen() {
           ) : (
             <>
               <FlatList<MessageItem>
+                ref={listRef}
                 style={styles.messageList}
                 contentContainerStyle={{ padding: 12 }}
                 data={selectedMessages}
                 renderItem={renderMessage}
                 keyExtractor={(m: MessageItem) => m.id}
+                onContentSizeChange={() => scrollToBottom(true)}
               />
               <View style={styles.inputRow}>
                 <TextInput
