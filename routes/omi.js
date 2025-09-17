@@ -104,12 +104,13 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       }
 
       // Transcript mode (existing behavior)
-      const { session_id, segments } = body;
-      if (!session_id || !Array.isArray(segments)) return res.status(400).json({ error: 'session_id and segments[] required' });
+      const session_id = (req.query && req.query.session_id ? String(req.query.session_id) : (body && body.session_id ? String(body.session_id) : null));
+      const segments = Array.isArray(body) ? body : (Array.isArray(body.segments) ? body.segments : []);
+      if (!session_id || !segments.length) return res.status(400).json({ error: 'session_id and segments[] required' });
 
       // Persist segments immediately for idempotency
       if (ENABLE_USER_SYSTEM && prisma) {
-        const payloadUserId = req.body?.user_id ? String(req.body.user_id) : null;
+        const payloadUserId = (req.query?.uid ? String(req.query.uid) : (req.body?.uid ? String(req.body.uid) : (req.body?.user_id ? String(req.body.user_id) : null)));
         let linkedUserId = null;
         if (payloadUserId) {
           try {
@@ -128,8 +129,8 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
           try {
             await prisma.transcriptSegment.upsert({
               where: { omiSessionId_omiSegmentId: { omiSessionId: sessionRow.id, omiSegmentId } },
-              update: { text, speaker: seg.speaker || null, speakerId: seg.speaker_id ?? null, isUser: seg.is_user ?? null, start: seg.start ?? null, end: seg.end ?? null },
-              create: { omiSessionId: sessionRow.id, omiSegmentId, text, speaker: seg.speaker || null, speakerId: seg.speaker_id ?? null, isUser: seg.is_user ?? null, start: seg.start ?? null, end: seg.end ?? null }
+              update: { text, speaker: seg.speaker || null, speakerId: (seg.speaker_id ?? seg.speakerId ?? null), isUser: seg.is_user ?? null, start: seg.start ?? null, end: seg.end ?? null },
+              create: { omiSessionId: sessionRow.id, omiSegmentId, text, speaker: seg.speaker || null, speakerId: (seg.speaker_id ?? seg.speakerId ?? null), isUser: seg.is_user ?? null, start: seg.start ?? null, end: seg.end ?? null }
             });
           } catch {}
         }
