@@ -222,7 +222,22 @@ export default function ChatScreen() {
     const res = await apiSendMessage({ conversation_id: selectedId, text });
     setSending(false);
     if (!res) return;
-    // Refresh messages to include assistant response
+    // Remove the optimistic message to avoid duplicates, server will return canonical message
+    setMessages((prev: MessageState) => {
+      const existing = prev.byConversationId[selectedId!]?.items || [];
+      const filtered = existing.filter((m) => m.id !== optimistic.id);
+      return {
+        byConversationId: {
+          ...prev.byConversationId,
+          [selectedId!]: {
+            items: filtered,
+            nextCursor: prev.byConversationId[selectedId!]?.nextCursor || null,
+            loading: false,
+          },
+        },
+      };
+    });
+    // Refresh messages to include server message + assistant response
     await loadLatest(selectedId);
   }, [input, sending, selectedId]);
 
