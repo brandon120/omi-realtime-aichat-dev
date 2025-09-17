@@ -144,7 +144,8 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
         if (!endSignal) return res.status(200).json({});
         const instructionsText = 'Ask questions naturally or use "Hey Omi" to be explicit.';
         const helpMessage = 'You can talk to me naturally! Try asking questions or giving commands.';
-        return res.status(200).json({ message: 'Meeting transcribed and saved.', help_response: helpMessage, instructions: instructionsText });
+        const aiResponse = 'Meeting transcribed and saved.';
+        return res.status(200).json({ message: aiResponse, help_response: helpMessage, instructions: instructionsText });
       }
 
       if (QUIET_HOURS_ENABLED && withinQuietHours(pref)) {
