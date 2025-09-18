@@ -6,6 +6,6 @@ export function getApiBaseUrl(): string {
   const extra = (Constants?.expoConfig as any)?.extra || {};
   const val = extra.apiBaseUrl as string | undefined;
   // Default to hosted dev-production backend when nothing provided
-  return val || 'https://omi-realtime-aichat-dev-production.up.railway.app';
+  return val || 'https://omi-realtime-production-production.up.railway.app';
 }
 
