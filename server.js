@@ -133,6 +133,7 @@ if (ENABLE_USER_SYSTEM) {
 
   // Send a user message; create/use conversation by id or by slot
   app.post('/messages/send', requireAuth, async (req, res) => {
+    const startTime = Date.now();
     try {
       if (!prisma) return res.status(503).json({ error: 'User system disabled' });
       const { conversation_id, slot, text } = req.body || {};
@@ -266,42 +267,45 @@ if (ENABLE_USER_SYSTEM) {
 
       const responseText = await formatTypedMessageWithLabelsAndFooter(req.user.id, assistantText);
 
-      // Optionally send OMI notification with the assistant answer (best-effort)
-      // Default behavior: disabled to avoid OMI API rate limits; rely on HTTP response instead
+      // Respond to the client immediately (include both keys for compatibility). message returns raw aiResponse
+      res.status(200).json({ ok: true, conversation_id: conversation.id, assistant_text: responseText, message: assistantText });
+      console.log('Send message response time:', Date.now() - startTime, 'ms');
+
+      // Fire-and-forget notification after responding
       if (SEND_TYPED_OMI_NOTIFICATIONS && !prefs.mute) {
-        try {
-          // Persist notification event
-          const event = await prisma.notificationEvent.create({
-            data: { userId: req.user.id, channel: 'OMI', message: responseText, status: 'queued' }
-          });
-          let delivered = false;
-          let errorMessage = null;
+        setImmediate(async () => {
           try {
-            const links = await prisma.omiUserLink.findMany({ where: { userId: req.user.id, isVerified: true }, select: { omiUserId: true } });
-            if (links.length > 0) {
-              for (const link of links) {
-                try {
-                  await sendOmiNotification(link.omiUserId, responseText);
-                  delivered = true;
-                  break;
-                } catch (e) {
-                  errorMessage = e?.message || String(e);
+            const event = await prisma.notificationEvent.create({
+              data: { userId: req.user.id, channel: 'OMI', message: responseText, status: 'queued' }
+            });
+            let delivered = false;
+            let errorMessage = null;
+            try {
+              const links = await prisma.omiUserLink.findMany({ where: { userId: req.user.id, isVerified: true }, select: { omiUserId: true } });
+              if (links.length > 0) {
+                for (const link of links) {
+                  try {
+                    await sendOmiNotification(link.omiUserId, responseText);
+                    delivered = true;
+                    break;
+                  } catch (e) {
+                    errorMessage = e?.message || String(e);
+                  }
                 }
+              } else {
+                errorMessage = 'No verified OMI link';
               }
-            } else {
-              errorMessage = 'No verified OMI link';
+            } catch (e) {
+              errorMessage = e?.message || String(e);
             }
-          } catch (e) {
-            errorMessage = e?.message || String(e);
+            try {
+              await prisma.notificationEvent.update({ where: { id: event.id }, data: { status: delivered ? 'sent' : 'error', error: delivered ? null : errorMessage } });
+            } catch {}
+          } catch (notifyErr) {
+            console.warn('Failed to queue/send OMI notification for typed message:', notifyErr?.message || notifyErr);
           }
-          try {
-            await prisma.notificationEvent.update({ where: { id: event.id }, data: { status: delivered ? 'sent' : 'error', error: delivered ? null : errorMessage } });
-          } catch {}
-        } catch (notifyErr) {
-          console.warn('Failed to queue/send OMI notification for typed message:', notifyErr?.message || notifyErr);
-        }
+        });
       }
-      res.status(200).json({ ok: true, conversation_id: conversation.id, assistant_text: responseText });
     } catch (e) {
       console.error('Send message error:', e);
       res.status(500).json({ error: 'Failed to send message' });
@@ -429,6 +433,7 @@ if (ENABLE_USER_SYSTEM) {
 
   // Create follow-up item and send as notification to the user
   app.post('/followups', requireAuth, async (req, res) => {
+    const startTime = Date.now();
     try {
       if (!prisma) return res.status(503).json({ error: 'User system disabled' });
       const { conversation_id, message } = req.body || {};
@@ -454,34 +459,37 @@ if (ENABLE_USER_SYSTEM) {
         }
       });
 
-      // Attempt to send via OMI if linked
-      let delivered = false;
-      let errorMessage = null;
-      try {
-        const links = await prisma.omiUserLink.findMany({ where: { userId: req.user.id, isVerified: true }, select: { omiUserId: true } });
-        if (links.length > 0) {
-          for (const link of links) {
-            try {
-              await sendOmiNotification(link.omiUserId, text);
-              delivered = true;
-              break;
-            } catch (e) {
-              errorMessage = e?.message || String(e);
+      // Respond immediately (include message so clients can render without notifications)
+      res.status(200).json({ ok: true, followup_id: event.id, message: text });
+      console.log('Followups response time:', Date.now() - startTime, 'ms');
+
+      // Fire-and-forget send via OMI if linked
+      setImmediate(async () => {
+        let delivered = false;
+        let errorMessage = null;
+        try {
+          const links = await prisma.omiUserLink.findMany({ where: { userId: req.user.id, isVerified: true }, select: { omiUserId: true } });
+          if (links.length > 0) {
+            for (const link of links) {
+              try {
+                await sendOmiNotification(link.omiUserId, text);
+                delivered = true;
+                break;
+              } catch (e) {
+                errorMessage = e?.message || String(e);
+              }
             }
+          } else {
+            errorMessage = 'No verified OMI link';
           }
-        } else {
-          errorMessage = 'No verified OMI link';
+        } catch (e) {
+          errorMessage = e?.message || String(e);
         }
-      } catch (e) {
-        errorMessage = e?.message || String(e);
-      }
 
-      // Update event status
-      try {
-        await prisma.notificationEvent.update({ where: { id: event.id }, data: { status: delivered ? 'sent' : 'error', error: delivered ? null : errorMessage } });
-      } catch {}
-
-      res.status(200).json({ ok: true, delivered, followup_id: event.id, error: delivered ? null : errorMessage });
+        try {
+          await prisma.notificationEvent.update({ where: { id: event.id }, data: { status: delivered ? 'sent' : 'error', error: delivered ? null : errorMessage } });
+        } catch {}
+      });
     } catch (e) {
       console.error('Followups API error:', e);
       res.status(500).json({ error: 'Failed to create follow-up' });
@@ -695,11 +703,7 @@ function isNearDuplicate(a, b) {
   return false;
 }
 
-// Rate limiting for Omi notifications (max 10 per hour)
-const notificationQueue = [];
-const notificationHistory = new Map(); // Track notifications per user
-const MAX_NOTIFICATIONS_PER_HOUR = 75;
-const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour in milliseconds
+// Notification rate limiting removed; notifications are sent best-effort without local limits.
 
 // Initialize OpenAI client (prefer OPENAI_API_KEY per latest SDK docs)
 const openai = new OpenAI({
@@ -741,7 +745,7 @@ try {
 }
 
 /**
- * Sends a direct notification to an Omi user with rate limiting.
+ * Sends a direct notification to an Omi user.
  * @param {string} userId - The Omi user's unique ID
  * @param {string} message - The notification text
  * @returns {Promise<object>} Response data or error
@@ -752,23 +756,6 @@ async function sendOmiNotification(userId, message) {
 
     if (!appId) throw new Error("OMI_APP_ID not set");
     if (!appSecret) throw new Error("OMI_APP_SECRET not set");
-
-    // Check rate limit for this user
-    const now = Date.now();
-    const userHistory = notificationHistory.get(userId) || [];
-    
-    // Remove notifications older than 1 hour
-    const recentNotifications = userHistory.filter(timestamp => 
-        now - timestamp < RATE_LIMIT_WINDOW
-    );
-    
-    if (recentNotifications.length >= MAX_NOTIFICATIONS_PER_HOUR) {
-        const oldestNotification = recentNotifications[0];
-        const timeUntilReset = RATE_LIMIT_WINDOW - (now - oldestNotification);
-        const minutesUntilReset = Math.ceil(timeUntilReset / (60 * 1000));
-        
-        throw new Error(`Rate limit exceeded. Maximum ${MAX_NOTIFICATIONS_PER_HOUR} notifications per hour. Try again in ${minutesUntilReset} minutes.`);
-    }
 
     const options = {
         hostname: 'api.omi.me',
@@ -787,25 +774,10 @@ async function sendOmiNotification(userId, message) {
             res.on('data', chunk => data += chunk);
             res.on('end', () => {
                 if (res.statusCode >= 200 && res.statusCode < 300) {
-                    try {
-                        // Update rate limit tracking
-                        if (!notificationHistory.has(userId)) {
-                            notificationHistory.set(userId, []);
-                        }
-                        notificationHistory.get(userId).push(now);
-                        
-                        resolve(data ? JSON.parse(data) : {});
-                    } catch (e) {
-                        resolve({ raw: data });
-                    }
+                    try { resolve(data ? JSON.parse(data) : {}); }
+                    catch (e) { resolve({ raw: data }); }
                 } else if (res.statusCode === 429) {
-                    // Rate limit exceeded - update tracking and reject
-                    if (!notificationHistory.has(userId)) {
-                        notificationHistory.set(userId, []);
-                    }
-                    notificationHistory.get(userId).push(now);
-                    
-                    reject(new Error(`Rate limit exceeded. Maximum ${MAX_NOTIFICATIONS_PER_HOUR} notifications per hour.`));
+                    reject(new Error('Rate limit exceeded by OMI (429).'));
                 } else {
                     reject(new Error(`API Error (${res.statusCode}): ${data}`));
                 }
@@ -907,30 +879,7 @@ async function omiReadMemories({ uid, limit = 100, offset = 0 }) {
   return omiApiRequest('GET', `/memories`, { query: { uid, limit, offset } });
 }
 
-/**
- * Gets the current rate limit status for a user
- * @param {string} userId - The Omi user's unique ID
- * @returns {object} Rate limit information
- */
-function getRateLimitStatus(userId) {
-    const now = Date.now();
-    const userHistory = notificationHistory.get(userId) || [];
-    const recentNotifications = userHistory.filter(timestamp => 
-        now - timestamp < RATE_LIMIT_WINDOW
-    );
-    
-    const remainingNotifications = MAX_NOTIFICATIONS_PER_HOUR - recentNotifications.length;
-    const timeUntilReset = recentNotifications.length > 0 ? 
-        RATE_LIMIT_WINDOW - (now - recentNotifications[0]) : 0;
-    
-    return {
-        remaining: Math.max(0, remainingNotifications),
-        used: recentNotifications.length,
-        limit: MAX_NOTIFICATIONS_PER_HOUR,
-        timeUntilReset: Math.ceil(timeUntilReset / (60 * 1000)), // minutes
-        isLimited: remainingNotifications <= 0
-    };
-}
+// getRateLimitStatus removed (no local rate limiting)
 
 // Conversation state is managed via OpenAI Conversations API per session
 
@@ -1058,11 +1007,7 @@ app.get('/health', (req, res) => {
       'keywords', 'trigger words', 'how to talk to you'
     ],
     example_usage: 'Hey Omi, what is the weather like in Sydney, Australia?',
-    rate_limiting: {
-      max_notifications_per_hour: MAX_NOTIFICATIONS_PER_HOUR,
-      active_users: notificationHistory.size,
-      note: 'Check /rate-limit/:userId for specific user status'
-    },
+    rate_limiting: { disabled: true },
     api: {
       type: 'OpenAI Responses API',
       model: OPENAI_MODEL,
@@ -1116,7 +1061,7 @@ app.get('/help', (req, res) => {
     features: {
       web_search: 'Built-in web search for current information',
       natural_language: 'Understands natural conversation patterns',
-      rate_limiting: 'Smart rate limiting to prevent API errors',
+      rate_limiting: 'Local rate limiting disabled',
       spaces: 'List and switch spaces: default, todos, memories, tasks, agent, friends, notifications',
       windows: 'List conversation windows and switch directly by number (1-5)'
     },
@@ -1762,18 +1707,9 @@ if (ENABLE_USER_SYSTEM) {
     }
   });
 }
-// Rate limit status endpoint
+// Local rate limit endpoint deprecated
 app.get('/rate-limit/:userId', (req, res) => {
-  const { userId } = req.params;
-  const status = getRateLimitStatus(userId);
-  
-  res.status(200).json({
-    user_id: userId,
-    rate_limit: status,
-    message: status.isLimited ? 
-      `Rate limited. Try again in ${status.timeUntilReset} minutes.` :
-      `${status.remaining} notifications remaining this hour.`
-  });
+  res.status(200).json({ disabled: true, message: 'Local rate limiting disabled on server.' });
 });
 
 // Activation metrics (no auth; informational only)
@@ -2668,23 +2604,7 @@ app.listen(PORT, async () => {
      }
    }, 5 * 60 * 1000); // 5 minutes
    
-   // Set up rate limit cleanup every hour
-   setInterval(() => {
-     const now = Date.now();
-     const oneHourAgo = now - RATE_LIMIT_WINDOW;
-     
-     for (const [userId, timestamps] of notificationHistory.entries()) {
-       // Remove timestamps older than 1 hour
-       const recentTimestamps = timestamps.filter(timestamp => timestamp > oneHourAgo);
-       
-       if (recentTimestamps.length === 0) {
-         notificationHistory.delete(userId);
-         console.log('🧹 Cleaned up old rate limit history for user:', userId);
-       } else {
-         notificationHistory.set(userId, recentTimestamps);
-       }
-     }
-   }, RATE_LIMIT_WINDOW); // 1 hour
+  // Rate limit cleanup removed (no local rate limiting)
   
   console.log('✅ Server ready to receive Omi webhooks');
 });

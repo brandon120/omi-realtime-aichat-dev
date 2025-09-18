@@ -72,12 +72,12 @@ Import memories to OMI, and trigger memory creation from transcripts or typed in
 - Bearer token (OMI app secret) or user session.
 
 **Rate Limits:**  
-- Typically 10-60/minute per user.
+- Local server-side rate limiting: disabled (rely on upstream provider limits)
 
 **Errors:**  
 - 400: missing uid/text
 - 401: auth
-- 429: rate limit
+- 429: upstream rate limit
 
 **Example Request:**
 ```bash
@@ -107,12 +107,12 @@ Connect OMI to external systems for data sync (import/export).
 - Bearer token (OMI app secret)
 
 **Rate Limits:**  
-- 10-60/minute per user
+- Local server-side rate limiting: disabled (rely on upstream provider limits)
 
 **Errors:**  
 - 400: missing params
 - 401: auth
-- 429: rate limit
+- 429: upstream rate limit
 
 **Implementation Notes:**  
 - Use idempotency keys (e.g., memory_id, conversation_id) to dedupe.
@@ -138,7 +138,7 @@ Process streaming transcript segments in real time, triggering memory or prompt 
 
 **Errors:**  
 - 400: missing session_id/uid
-- 429: rate limit
+- 429: upstream rate limit
 
 **Example Request:**
 ```bash
@@ -254,7 +254,7 @@ Fetch all memories for a user, with pagination.
 
 - Log all API calls, errors, and retries.
 - Metrics: request counts, error rates, latency.
-- Alerts: on 5xx spikes, rate limit triggers.
+- Alerts: on 5xx spikes; monitor upstream 429s.
 
 ### 3.7 Rollout Plan
 
@@ -310,7 +310,7 @@ Fetch all memories for a user, with pagination.
   - Use the conversation slot/window system to keep context organized.
 - **c. Improve notification logic:**
   - Only send notifications for valid, contextually-activated AI responses.
-  - Add a “rate limit” or “quiet hours” feature if needed.
+  - Support “quiet hours” feature; local rate limiting disabled by default.
 - **d. Update user preferences:**
   - Allow users to adjust activation sensitivity and listen mode in the app.
   - Optionally, expose a “mute” or “do not disturb” toggle.
@@ -439,7 +439,7 @@ type TranscriptSegment = {
 ## 7. Risks and Open Questions
 
 - **OMI API changes**: Monitor for breaking changes in OMI endpoints.
-- **Rate limits**: Ensure proper handling and backoff.
+- **Rate limits**: Handle upstream 429s with backoff.
 - **Audio streaming**: If required, may need a sidecar service.
 - **Prompt config**: Decide on DB vs. file storage for prompt definitions.
 - **Data reconciliation**: How to handle conflicts between local and OMI memories/conversations.

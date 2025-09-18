@@ -420,8 +420,7 @@ model AgentEvent {
 - **Response**: Usage instructions and examples
 
 #### GET `/rate-limit/:userId`
-- **Purpose**: Check rate limit status
-- **Response**: Rate limit information
+- Local rate limiting disabled; endpoint returns `{ disabled: true }` for compatibility
 
 #### GET `/metrics/activation`
 - **Purpose**: Activation metrics
@@ -449,7 +448,7 @@ model AgentEvent {
 
 - **Session-based authentication** with signed cookies
 - **Password hashing** using Argon2
-- **Rate limiting** for OMI notifications (10/hour per user)
+- Local rate limiting for OMI notifications: disabled
 - **CORS protection** with configurable origins
 - **Input validation** and sanitization
 - **SQL injection protection** via Prisma ORM
@@ -460,7 +459,7 @@ model AgentEvent {
 - **Fallback**: Standard Chat Completions API
 - **Model**: `gpt-5-mini-2025-08-07` (primary), `gpt-4o` (fallback)
 - **Features**: Web search, conversation state, memory injection
-- **Rate limiting**: Built-in OpenAI rate limiting
+- Rate limiting: rely on upstream provider limits
 
 ### Context Management
 
@@ -532,13 +531,13 @@ CORS_ORIGINS=http://localhost:8081,https://yourdomain.com
 1. **Database**: PostgreSQL with Prisma migrations
 2. **Environment**: Node.js 18+ with PM2 or similar
 3. **Security**: HTTPS, secure cookies, environment variables
-4. **Monitoring**: Health checks, rate limiting, error handling
+4. **Monitoring**: Health checks, error handling
 5. **Scaling**: Stateless design, database connection pooling
 
 ### Performance Optimizations
 
 - **Connection pooling** for database connections
-- **Rate limiting** to prevent abuse
+- Rate limiting: handled upstream
 - **Caching** for frequently accessed data
 - **Async processing** for non-critical operations
 - **Error handling** with graceful degradation
