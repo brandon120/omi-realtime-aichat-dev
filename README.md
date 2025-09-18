@@ -305,7 +305,7 @@ The plugin handles various error scenarios:
 - API keys are stored as environment variables
 - Input validation prevents malicious payloads
 - HTTPS enforced in production (Railway)
-- Rate limiting can be added if needed
+- Local rate limiting is disabled by default; rely on upstream provider limits
 
 ## 🧪 Testing
 
