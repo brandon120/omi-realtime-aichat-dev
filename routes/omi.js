@@ -34,6 +34,7 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
   const lastProcessedQuestion = new Map();
 
   app.post('/omi-webhook', async (req, res) => {
+    const startTime = Date.now();
     try {
       // Memory ingestion mode (payload includes full memory object and uid query)
       const uid = req.query && req.query.uid ? String(req.query.uid) : null;
@@ -252,9 +253,15 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
         }
       }
 
-      // Persist conversation + messages
+      const instructionsText = 'Ask questions naturally or use "Hey Omi" to be explicit.';
+      const helpMessage = 'You can talk to me naturally! Try asking questions or giving commands.';
+      const response = { message: aiResponse, help_response: helpMessage, instructions: instructionsText };
+      const jsonRes = res.status(200).json(response);
+      console.log('Webhook response time:', Date.now() - startTime, 'ms');
+
+      // Background persistence and notifications
       if (ENABLE_USER_SYSTEM && prisma && conversationId) {
-        (async () => {
+        setImmediate(async () => {
           try {
             const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
             if (!sessionRow) return;
@@ -265,7 +272,6 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
             });
             await prisma.message.create({ data: { conversationId: conversationRow.id, role: 'USER', text: question, source: 'OMI_TRANSCRIPT' } });
             await prisma.message.create({ data: { conversationId: conversationRow.id, role: 'ASSISTANT', text: aiResponse, source: 'SYSTEM' } });
-            // Ensure user's active window points to this conversation
             if (sessionRow.userId) {
               const userId = sessionRow.userId;
               let active = await prisma.userContextWindow.findFirst({ where: { userId, isActive: true } });
@@ -280,13 +286,12 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
                 await prisma.userContextWindow.update({ where: { userId_slot: { userId, slot: active.slot } }, data: { conversationId: conversationRow.id } });
               }
             }
-          } catch {}
-        })();
+          } catch (e) {
+            console.error('Background conversation save failed:', e);
+          }
+        });
       }
-
-      const instructionsText = 'Ask questions naturally or use "Hey Omi" to be explicit.';
-      const helpMessage = 'You can talk to me naturally! Try asking questions or giving commands.';
-      return res.status(200).json({ message: aiResponse, help_response: helpMessage, instructions: instructionsText });
+      return jsonRes;
     } catch (e) {
       return res.status(500).json({ error: 'Webhook processing failed' });
     }
