@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { StyleSheet, View, Text, Button, TextInput, Alert, FlatList, ActivityIndicator, TouchableOpacity, useWindowDimensions } from 'react-native';
+import { StyleSheet, View, Text, Button, TextInput, Alert, FlatList, ActivityIndicator, TouchableOpacity, useWindowDimensions, Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Swipeable } from 'react-native-gesture-handler';
 import { ThemedView, ThemedText } from '@/components/Themed';
@@ -104,6 +104,20 @@ export default function MemoriesScreen() {
               <Text style={styles.deleteText}>Delete</Text>
             </TouchableOpacity>
           );
+          // On web, avoid react-native-gesture-handler Swipeable which relies on findNodeHandle
+          if (Platform.OS === 'web') {
+            return (
+              <View style={styles.cardRow}>
+                <View style={[styles.card, { flex: 1 }]}>
+                  <Text style={styles.cardText}>{item.text}</Text>
+                  <Text style={styles.cardMeta}>{new Date(item.createdAt).toLocaleString()}</Text>
+                </View>
+                <TouchableOpacity style={[styles.deleteAction, { marginLeft: 8, height: '100%' }]} onPress={() => deleteMemory(item.id)}>
+                  <Text style={styles.deleteText}>Delete</Text>
+                </TouchableOpacity>
+              </View>
+            );
+          }
           return (
             <Swipeable renderRightActions={rightActions} overshootRight={false}>
               <View style={styles.card}>
@@ -126,6 +140,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, padding: 16, gap: 16 },
   row: { flexDirection: 'row', gap: 8 },
   input: { flex: 1, borderWidth: 1, borderColor: '#ccc', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10 },
+  cardRow: { flexDirection: 'row', alignItems: 'stretch', marginBottom: 8 },
   card: { borderWidth: 1, borderColor: '#ddd', backgroundColor: '#fff', borderRadius: 8, padding: 12, marginBottom: 8 },
   cardText: { fontSize: 16 },
   cardMeta: { color: '#666', marginTop: 6 },

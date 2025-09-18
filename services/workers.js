@@ -2,6 +2,14 @@
 
 const { ENABLE_PROMPT_WORKERS } = require('../featureFlags');
 
+// Minimal baseline; advanced tasks intentionally disabled for now
+
+async function processToolJobs() { /* disabled */ }
+
+async function syncMemoriesToVectorStore() { /* disabled */ }
+
+async function runWebSearch() { /* disabled */ }
+
 function startBackgroundWorkers({ prisma, openai, logger = console }) {
   if (!ENABLE_PROMPT_WORKERS) {
     logger.log('Background workers disabled.');

@@ -1826,6 +1826,7 @@ app.get('/omi/import/memories', async (req, res) => {
 // Main Omi webhook endpoint (legacy). Disabled when ENABLE_NEW_OMI_ROUTES=true
 if (!ENABLE_NEW_OMI_ROUTES) app.post('/omi-webhook', async (req, res) => {
   try {
+    const startTime = Date.now();
     console.log('📥 Received webhook from Omi:', JSON.stringify(req.body, null, 2));
     
     const { session_id, segments } = req.body;
@@ -1856,61 +1857,64 @@ if (!ENABLE_NEW_OMI_ROUTES) app.post('/omi-webhook', async (req, res) => {
     console.log('📝 Accumulated transcript for session:', fullTranscript);
     console.log('📊 Total segments in session:', sessionSegments.length);
     
-    // Voice OTP verification flow (feature-flagged)
+    // Voice OTP verification flow (feature-flagged) — respond immediately, verify in background
     if (ENABLE_USER_SYSTEM && prisma) {
       try {
-        // Look for patterns like: "verify 123456" (case-insensitive, allows extra words before/after)
         const verifyMatch = fullTranscript.match(/\bverify\s+(\d{6})\b/i);
         if (verifyMatch) {
           const spokenCode = verifyMatch[1];
-          // Find pending link by code (unique enough for short TTL); newest wins if multiple
-          const link = await prisma.omiUserLink.findFirst({
-            where: { isVerified: false, verificationCode: spokenCode, verificationExpiresAt: { gt: new Date() } },
-            orderBy: { createdAt: 'desc' }
-          });
-          if (link) {
-            if (link.verificationAttempts >= MAX_OTP_ATTEMPTS) {
-              sessionTranscripts.delete(session_id);
-              return res.status(200).json({ message: 'Too many attempts. Please request a new code.' });
-            }
-            // Mark verified
-            await prisma.omiUserLink.update({
-              where: { omiUserId: link.omiUserId },
-              data: {
-                isVerified: true,
-                verifiedAt: new Date(),
-                verificationCode: null,
-                verificationExpiresAt: null,
-                verificationAttempts: 0
-              }
-            });
-            // Attach active Omi session to this user
+          res.status(200).json({ message: 'Verification received. Processing now…' });
+          console.log('Webhook response time:', Date.now() - startTime, 'ms');
+          setImmediate(async () => {
             try {
-              await prisma.omiSession.upsert({
-                where: { omiSessionId: String(session_id) },
-                update: { userId: link.userId, lastSeenAt: new Date() },
-                create: { omiSessionId: String(session_id), userId: link.userId }
-              });
-            } catch (attachErr) {
-              console.warn('Failed to upsert/attach OmiSession:', attachErr?.message || attachErr);
-            }
-            sessionTranscripts.delete(session_id);
-            return res.status(200).json({ message: 'Verification successful. Your account is now linked.' });
-          } else {
-            // Increment attempts for any active links to gently rate-limit guessing (best-effort)
-            try {
-              await prisma.omiUserLink.updateMany({
+              const link = await prisma.omiUserLink.findFirst({
                 where: { isVerified: false, verificationCode: spokenCode, verificationExpiresAt: { gt: new Date() } },
-                data: { verificationAttempts: { increment: 1 } }
+                orderBy: { createdAt: 'desc' }
               });
-            } catch {}
-            sessionTranscripts.delete(session_id);
-            return res.status(200).json({ message: 'That code was not recognized. Please try again.' });
-          }
+              if (link) {
+                if (link.verificationAttempts >= MAX_OTP_ATTEMPTS) {
+                  sessionTranscripts.delete(session_id);
+                  return;
+                }
+                await prisma.omiUserLink.update({
+                  where: { omiUserId: link.omiUserId },
+                  data: {
+                    isVerified: true,
+                    verifiedAt: new Date(),
+                    verificationCode: null,
+                    verificationExpiresAt: null,
+                    verificationAttempts: 0
+                  }
+                });
+                try {
+                  await prisma.omiSession.upsert({
+                    where: { omiSessionId: String(session_id) },
+                    update: { userId: link.userId, lastSeenAt: new Date() },
+                    create: { omiSessionId: String(session_id), userId: link.userId }
+                  });
+                } catch (attachErr) {
+                  console.error('Background OTP attach session failed:', attachErr);
+                }
+                sessionTranscripts.delete(session_id);
+              } else {
+                try {
+                  await prisma.omiUserLink.updateMany({
+                    where: { isVerified: false, verificationCode: spokenCode, verificationExpiresAt: { gt: new Date() } },
+                    data: { verificationAttempts: { increment: 1 } }
+                  });
+                } catch (incErr) {
+                  console.error('Background OTP attempt increment failed:', incErr);
+                }
+                sessionTranscripts.delete(session_id);
+              }
+            } catch (e) {
+              console.error('Background voice OTP processing failed:', e);
+            }
+          });
+          return;
         }
       } catch (voiceErr) {
         console.warn('Voice verification check failed:', voiceErr?.message || voiceErr);
-        // continue to normal handling
       }
     }
     
@@ -1950,29 +1954,29 @@ if (!ENABLE_NEW_OMI_ROUTES) app.post('/omi-webhook', async (req, res) => {
         // Keep accumulating silently
         return res.status(200).json({});
       }
-      // On end: persist
-      try {
-        const allText = sessionTranscripts.get(session_id)?.map((s) => s.text).join(' ').trim() || '';
-        sessionTranscripts.delete(session_id);
-        if (allText && ENABLE_USER_SYSTEM && prisma) {
-          const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
-          if (sessionRow && sessionRow.userId) {
-            // Save to local memories
-            await prisma.memory.create({ data: { userId: sessionRow.userId, text: allText } });
+      // On end: return immediately, then persist in background
+      const msg = await formatMessageWithFooter(session_id, 'Meeting transcribed and saved to your memories.');
+      res.status(200).json({ message: msg });
+      console.log('Webhook response time:', Date.now() - startTime, 'ms');
+      setImmediate(async () => {
+        try {
+          const allText = sessionTranscripts.get(session_id)?.map((s) => s.text).join(' ').trim() || '';
+          sessionTranscripts.delete(session_id);
+          if (allText && ENABLE_USER_SYSTEM && prisma) {
+            const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
+            if (sessionRow && sessionRow.userId) {
+              await prisma.memory.create({ data: { userId: sessionRow.userId, text: allText } });
+            }
           }
+          const uid = req.body?.user_id ? String(req.body.user_id) : null;
+          if (uid) {
+            try { await omiCreateMemories({ uid, text: 'Meeting transcript', text_source: 'other', memories: [ { text: allText } ] }); } catch {}
+          }
+        } catch (e) {
+          console.error('Background meeting transcript save failed:', e);
         }
-        // Best-effort: also push to OMI user memories when user_id present
-        const uid = req.body?.user_id ? String(req.body.user_id) : null;
-        if (uid) {
-          try { await omiCreateMemories({ uid, text: 'Meeting transcript', text_source: 'other', memories: [ { text: allText } ] }); } catch {}
-        }
-        const msg = await formatMessageWithFooter(session_id, 'Meeting transcribed and saved to your memories.');
-        return res.status(200).json({ message: msg });
-      } catch (e) {
-        console.warn('Meeting transcribe save failed:', e?.message || e);
-        sessionTranscripts.delete(session_id);
-        return res.status(200).json({ message: 'I tried to save the meeting transcript but hit an error.' });
-      }
+      });
+      return;
     }
 
     // Context-gated AI activation depending on preferences
@@ -2491,7 +2495,7 @@ if (!ENABLE_NEW_OMI_ROUTES) app.post('/omi-webhook', async (req, res) => {
 
     // Persist conversation+messages (non-blocking)
     if (ENABLE_USER_SYSTEM && prisma) {
-      (async () => {
+      setImmediate(async () => {
         try {
           const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
           let conversationRow = null;
@@ -2556,16 +2560,18 @@ if (!ENABLE_NEW_OMI_ROUTES) app.post('/omi-webhook', async (req, res) => {
             }
           }
         } catch (postPersistErr) {
-          console.warn('Webhook persistence error (post-AI):', postPersistErr?.message || postPersistErr);
+          console.error('Background conversation save failed:', postPersistErr);
         }
-      })();
+      });
     }
 
     // Return response so Omi shows content in chat and sends a single notification
     sessionTranscripts.delete(session_id);
     console.log('🧹 Cleared session transcript for:', session_id);
     const finalMsg = await formatMessageWithFooter(session_id, aiResponse, { includeHeader: true });
-    return res.status(200).json({ message: finalMsg });
+    const resp = res.status(200).json({ message: finalMsg });
+    console.log('Webhook response time:', Date.now() - startTime, 'ms');
+    return resp;
     
   } catch (error) {
     console.error('❌ Error processing webhook:', error);

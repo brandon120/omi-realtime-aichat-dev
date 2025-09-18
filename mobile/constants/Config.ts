@@ -5,6 +5,7 @@ export function getApiBaseUrl(): string {
   if (fromPublic && fromPublic.length > 0) return fromPublic;
   const extra = (Constants?.expoConfig as any)?.extra || {};
   const val = extra.apiBaseUrl as string | undefined;
-  return val || 'http://localhost:3000';
+  // Default to hosted dev-production backend when nothing provided
+  return val || 'https://omi-realtime-production-production.up.railway.app';
 }
 
