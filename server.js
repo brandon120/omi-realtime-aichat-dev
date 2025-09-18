@@ -267,8 +267,8 @@ if (ENABLE_USER_SYSTEM) {
 
       const responseText = await formatTypedMessageWithLabelsAndFooter(req.user.id, assistantText);
 
-      // Respond to the client immediately (include both keys for compatibility)
-      res.status(200).json({ ok: true, conversation_id: conversation.id, assistant_text: responseText, message: responseText });
+      // Respond to the client immediately (include both keys for compatibility). message returns raw aiResponse
+      res.status(200).json({ ok: true, conversation_id: conversation.id, assistant_text: responseText, message: assistantText });
       console.log('Send message response time:', Date.now() - startTime, 'ms');
 
       // Fire-and-forget notification after responding
@@ -459,8 +459,8 @@ if (ENABLE_USER_SYSTEM) {
         }
       });
 
-      // Respond immediately
-      res.status(200).json({ ok: true, followup_id: event.id });
+      // Respond immediately (include message so clients can render without notifications)
+      res.status(200).json({ ok: true, followup_id: event.id, message: text });
       console.log('Followups response time:', Date.now() - startTime, 'ms');
 
       // Fire-and-forget send via OMI if linked
