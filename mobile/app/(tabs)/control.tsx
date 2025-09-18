@@ -29,6 +29,8 @@ export default function ChatScreen() {
   const [messages, setMessages] = useState<MessageState>({ byConversationId: {} });
   const [input, setInput] = useState<string>('');
   const [sending, setSending] = useState<boolean>(false);
+  const sendingGuardRef = useRef<boolean>(false);
+  const lastSentRef = useRef<{ text: string; ts: number } | null>(null);
   const pollingRef = useRef<any>(null);
   const [hasOmiLink, setHasOmiLink] = useState<boolean>(true);
   const listRef = useRef<FlatList<MessageItem> | null>(null);
@@ -159,6 +161,12 @@ export default function ChatScreen() {
     const text = input.trim();
     if (!text || sending) return;
     if (!selectedId) return;
+    if (sendingGuardRef.current) return; // guard against rapid double-taps
+    const now = Date.now();
+    if (lastSentRef.current && (now - lastSentRef.current.ts) < 1200 && lastSentRef.current.text === text) {
+      return;
+    }
+    sendingGuardRef.current = true;
     setSending(true);
 
     // Slash commands
@@ -167,12 +175,14 @@ export default function ChatScreen() {
       if (cmd.startsWith('notify ')) {
         const ok = await apiCreateFollowup({ conversation_id: selectedId, message: cmd.slice('notify '.length) });
         setSending(false);
+        sendingGuardRef.current = false;
         setInput('');
         return;
       }
       if (cmd.startsWith('space ')) {
         await apiSwitchSpace(cmd.slice('space '.length).trim());
         setSending(false);
+        sendingGuardRef.current = false;
         setInput('');
         return;
       }
@@ -180,18 +190,21 @@ export default function ChatScreen() {
         const num = parseInt(cmd.slice('window '.length).trim(), 10);
         if (!isNaN(num)) await apiActivateWindow(num);
         setSending(false);
+        sendingGuardRef.current = false;
         setInput('');
         return;
       }
       if (cmd.startsWith('mem ')) {
         await apiCreateMemory(cmd.slice('mem '.length).trim());
         setSending(false);
+        sendingGuardRef.current = false;
         setInput('');
         return;
       }
       if (cmd.startsWith('task ')) {
         await apiCreateTask(cmd.slice('task '.length).trim());
         setSending(false);
+        sendingGuardRef.current = false;
         setInput('');
         return;
       }
@@ -221,6 +234,8 @@ export default function ChatScreen() {
 
     const res = await apiSendMessage({ conversation_id: selectedId, text });
     setSending(false);
+    sendingGuardRef.current = false;
+    lastSentRef.current = { text, ts: Date.now() };
     if (!res) return;
     // Remove the optimistic message to avoid duplicates, server will return canonical message
     setMessages((prev: MessageState) => {

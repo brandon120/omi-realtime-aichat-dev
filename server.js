@@ -173,6 +173,23 @@ if (ENABLE_USER_SYSTEM) {
         }
       }
 
+      // Suppress near-duplicate rapid sends (e.g., double-tap) within 3 seconds
+      try {
+        const lastUser = await prisma.message.findFirst({
+          where: { conversationId: conversation.id, role: 'USER' },
+          orderBy: { createdAt: 'desc' },
+          select: { text: true, createdAt: true }
+        });
+        if (lastUser) {
+          const prevNorm = normalizeText(lastUser.text || '');
+          const currNorm = normalizeText(messageText);
+          const recentMs = Date.now() - new Date(lastUser.createdAt).getTime();
+          if (recentMs <= 3000 && isNearDuplicate(prevNorm, currNorm)) {
+            return res.status(200).json({ ok: true, conversation_id: conversation.id, assistant_text: '' });
+          }
+        }
+      } catch {}
+
       // Ensure an OpenAI conversation id exists for typed threads
       let openaiConvId = conversation.openaiConversationId;
       if (!openaiConvId) {
