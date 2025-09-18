@@ -267,8 +267,8 @@ if (ENABLE_USER_SYSTEM) {
 
       const responseText = await formatTypedMessageWithLabelsAndFooter(req.user.id, assistantText);
 
-      // Respond to the client immediately
-      res.status(200).json({ ok: true, conversation_id: conversation.id, assistant_text: responseText });
+      // Respond to the client immediately (include both keys for compatibility)
+      res.status(200).json({ ok: true, conversation_id: conversation.id, assistant_text: responseText, message: responseText });
       console.log('Send message response time:', Date.now() - startTime, 'ms');
 
       // Fire-and-forget notification after responding
