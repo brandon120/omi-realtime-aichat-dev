@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { buildActivationRegex, withinQuietHours, normalizeText, isNearDuplicate } = require('../services/activation');
 const { ENABLE_CONTEXT_ACTIVATION, QUIET_HOURS_ENABLED } = require('../featureFlags');
 
-module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, ENABLE_USER_SYSTEM }) {
+module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, ENABLE_USER_SYSTEM, backgroundQueue }) {
   if (!app) throw new Error('app is required');
 
   // Helper: fetch session + user preferences and derive activation config
@@ -49,14 +49,81 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
 
   // Stateful dedupe per session (kept minimal; acceptable until cutover)
   const lastProcessedQuestion = new Map();
+  
+  // Session metadata cache to avoid repeated database calls
+  const sessionCache = new Map();
+  const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+  
+  // Helper to get cached session metadata
+  async function getCachedSessionMetadata(sessionId, linkedUserId = null) {
+    const cacheKey = `${sessionId}-${linkedUserId || 'null'}`;
+    const cached = sessionCache.get(cacheKey);
+    
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      return cached.data;
+    }
+    
+    let sessionRow = null;
+    if (ENABLE_USER_SYSTEM && prisma) {
+      try {
+        sessionRow = await prisma.omiSession.findUnique({
+          where: { omiSessionId: String(sessionId) },
+          include: { user: true, preferences: true }
+        });
+      } catch {}
+    }
+    
+    const metadata = { sessionRow, linkedUserId };
+    sessionCache.set(cacheKey, { data: metadata, timestamp: Date.now() });
+    
+    // Clean up old cache entries periodically
+    if (sessionCache.size > 1000) {
+      const now = Date.now();
+      for (const [key, value] of sessionCache.entries()) {
+        if (now - value.timestamp > CACHE_TTL) {
+          sessionCache.delete(key);
+        }
+      }
+    }
+    
+    return metadata;
+  }
 
   app.post('/omi-webhook', async (req, res) => {
     const startTime = Date.now();
     try {
-      // Memory ingestion mode (payload includes full memory object and uid query)
+      // Combined payload support: can include both transcript segments and memory data
       const uid = req.query && req.query.uid ? String(req.query.uid) : null;
       const body = req.body || {};
-      const isMemoryPayload = !!(uid && (Array.isArray(body.transcript_segments) || body.structured || typeof body.discarded !== 'undefined'));
+      const hasTranscriptSegments = Array.isArray(body.segments) && body.segments.length > 0;
+      const hasMemoryData = !!(uid && (Array.isArray(body.transcript_segments) || body.structured || typeof body.discarded !== 'undefined'));
+      const session_id = (req.query && req.query.session_id ? String(req.query.session_id) : (body && body.session_id ? String(body.session_id) : null));
+      
+      // Handle combined payload: transcript + memory
+      if (hasTranscriptSegments && hasMemoryData && session_id) {
+        // Queue memory save for background processing
+        if (backgroundQueue && !body.discarded) {
+          const memText = (await composeMemoryText(body)).trim();
+          if (memText) {
+            try {
+              const link = await prisma.omiUserLink.findUnique({ where: { omiUserId: uid } });
+              if (link && link.isVerified) {
+                backgroundQueue.enqueue({
+                  type: 'MEMORY_SAVE',
+                  data: { userId: link.userId, text: memText }
+                });
+              }
+            } catch (e) {
+              console.warn('Failed to queue memory save:', e?.message || e);
+            }
+          }
+        }
+        
+        // Continue with transcript processing (fall through to transcript mode)
+      }
+      
+      // Memory-only payload (existing behavior)
+      const isMemoryPayload = hasMemoryData && !hasTranscriptSegments;
 
       async function composeMemoryText(payload) {
         try {
@@ -122,11 +189,10 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       }
 
       // Transcript mode (existing behavior)
-      const session_id = (req.query && req.query.session_id ? String(req.query.session_id) : (body && body.session_id ? String(body.session_id) : null));
       const segments = Array.isArray(body) ? body : (Array.isArray(body.segments) ? body.segments : []);
       if (!session_id || !segments.length) return res.status(400).json({ error: 'session_id and segments[] required' });
 
-      // Resolve any linked user/session metadata needed for context without blocking the response on writes.
+      // Resolve any linked user/session metadata using cache for faster response
       let linkedUserId = null;
       let sessionRowCache = null;
       if (ENABLE_USER_SYSTEM && prisma) {
@@ -137,12 +203,10 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
             if (link && link.isVerified) linkedUserId = link.userId;
           } catch {}
         }
-        try {
-          sessionRowCache = await prisma.omiSession.findUnique({
-            where: { omiSessionId: String(session_id) },
-            include: { user: true, preferences: true }
-          });
-        } catch {}
+        
+        // Use cached session metadata
+        const cachedMetadata = await getCachedSessionMetadata(session_id, linkedUserId);
+        sessionRowCache = cachedMetadata.sessionRow;
         if (!linkedUserId && sessionRowCache?.userId) {
           linkedUserId = sessionRowCache.userId;
         }
@@ -271,93 +335,78 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       const jsonRes = res.status(200).json(response);
       console.log('Webhook response time:', Date.now() - startTime, 'ms');
 
-      // Background persistence and notifications
-      if (ENABLE_USER_SYSTEM && prisma) {
+      // Queue background jobs for persistence (non-blocking)
+      if (ENABLE_USER_SYSTEM && prisma && backgroundQueue) {
         const backgroundSessionId = String(session_id);
         const backgroundSegments = Array.isArray(segments) ? segments.slice() : [];
         const backgroundLinkedUserId = linkedUserId;
         const backgroundConversationId = conversationId ? String(conversationId) : null;
         const backgroundQuestion = question;
         const backgroundAiResponse = aiResponse;
-        setImmediate(async () => {
-          try {
-            const sessionUpdate = { lastSeenAt: new Date() };
-            const sessionCreate = { omiSessionId: backgroundSessionId };
-            if (backgroundLinkedUserId) {
-              sessionUpdate.userId = backgroundLinkedUserId;
-              sessionCreate.userId = backgroundLinkedUserId;
-            }
-            if (backgroundConversationId) {
-              sessionUpdate.openaiConversationId = backgroundConversationId;
-              sessionCreate.openaiConversationId = backgroundConversationId;
-            }
-            const sessionRow = await prisma.omiSession.upsert({
-              where: { omiSessionId: backgroundSessionId },
-              update: sessionUpdate,
-              create: sessionCreate
-            });
-            const sessionRowId = sessionRow?.id;
-
-            if (sessionRowId && backgroundSegments.length) {
-              try {
-                const operations = backgroundSegments.map((seg) => {
-                  if (!seg) return Promise.resolve();
-                  const text = String(seg.text || '');
-                  const omiSegmentId = String(seg.id || seg.segment_id || crypto.createHash('sha1').update(text).digest('hex'));
-                  return prisma.transcriptSegment.upsert({
-                    where: { omiSessionId_omiSegmentId: { omiSessionId: sessionRowId, omiSegmentId } },
-                    update: { text, speaker: seg.speaker || null, speakerId: (seg.speaker_id ?? seg.speakerId ?? null), isUser: seg.is_user ?? null, start: seg.start ?? null, end: seg.end ?? null },
-                    create: { omiSessionId: sessionRowId, omiSegmentId, text, speaker: seg.speaker || null, speakerId: (seg.speaker_id ?? seg.speakerId ?? null), isUser: seg.is_user ?? null, start: seg.start ?? null, end: seg.end ?? null }
-                  }).catch((err) => {
-                    console.error('Transcript segment upsert failed:', err);
-                  });
-                });
-                await Promise.all(operations);
-              } catch (err) {
-                console.error('Background transcript persistence failed:', err);
-              }
-            }
-
-            if (sessionRowId && backgroundConversationId) {
-              try {
-                const conversationRow = await prisma.conversation.upsert({
-                  where: { omiSessionId_openaiConversationId: { omiSessionId: sessionRowId, openaiConversationId: backgroundConversationId } },
-                  update: {},
-                  create: { omiSessionId: sessionRowId, openaiConversationId: backgroundConversationId }
-                });
-                if (backgroundQuestion) {
-                  await prisma.message.create({ data: { conversationId: conversationRow.id, role: 'USER', text: backgroundQuestion, source: 'OMI_TRANSCRIPT' } });
-                }
-                if (backgroundAiResponse) {
-                  await prisma.message.create({ data: { conversationId: conversationRow.id, role: 'ASSISTANT', text: backgroundAiResponse, source: 'SYSTEM' } });
-                }
-                if (sessionRow.userId) {
-                  const userId = sessionRow.userId;
-                  let active = await prisma.userContextWindow.findFirst({ where: { userId, isActive: true } });
-                  if (!active) {
-                    const existingSlot1 = await prisma.userContextWindow.findUnique({ where: { userId_slot: { userId, slot: 1 } } });
-                    if (!existingSlot1) {
-                      await prisma.userContextWindow.create({ data: { userId, slot: 1, conversationId: conversationRow.id, isActive: true } });
-                    } else {
-                      await prisma.userContextWindow.update({ where: { userId_slot: { userId, slot: 1 } }, data: { conversationId: conversationRow.id, isActive: true } });
-                    }
-                  } else {
-                    await prisma.userContextWindow.update({ where: { userId_slot: { userId, slot: active.slot } }, data: { conversationId: conversationRow.id } });
-                  }
-                }
-              } catch (err) {
-                console.error('Background conversation save failed:', err);
-              }
-            }
-          } catch (err) {
-            console.error('Background session persistence failed:', err);
+        
+        // Queue session update
+        backgroundQueue.enqueue({
+          type: 'SESSION_UPDATE',
+          data: {
+            sessionId: backgroundSessionId,
+            userId: backgroundLinkedUserId,
+            conversationId: backgroundConversationId,
+            lastSeenAt: new Date()
           }
         });
+        
+        // Queue transcript batch upserts
+        if (backgroundSegments.length) {
+          backgroundQueue.enqueue({
+            type: 'TRANSCRIPT_BATCH',
+            data: {
+              sessionId: backgroundSessionId,
+              segments: backgroundSegments
+            }
+          });
+        }
+        
+        // Queue conversation save
+        if (backgroundConversationId && (backgroundQuestion || backgroundAiResponse)) {
+          backgroundQueue.enqueue({
+            type: 'CONVERSATION_SAVE',
+            data: {
+              sessionId: backgroundSessionId,
+              conversationId: backgroundConversationId,
+              question: backgroundQuestion,
+              aiResponse: backgroundAiResponse
+            }
+          });
+          
+          // Queue context window update if user is linked
+          if (backgroundLinkedUserId) {
+            backgroundQueue.enqueue({
+              type: 'CONTEXT_WINDOW_UPDATE',
+              data: {
+                userId: backgroundLinkedUserId,
+                conversationId: backgroundConversationId
+              }
+            });
+          }
+        }
       }
       return jsonRes;
     } catch (e) {
       return res.status(500).json({ error: 'Webhook processing failed' });
     }
+  });
+
+  // Health check endpoint for background queue
+  app.get('/omi-webhook/queue-status', (req, res) => {
+    if (!backgroundQueue) {
+      return res.status(503).json({ error: 'Background queue not available' });
+    }
+    
+    const status = backgroundQueue.getStatus();
+    res.status(200).json({
+      ok: true,
+      queue: status
+    });
   });
 };
 
