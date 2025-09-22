@@ -1856,7 +1856,7 @@ if (!ENABLE_NEW_OMI_ROUTES) app.post('/omi-webhook', async (req, res) => {
       }
     }
     
-    // Load preferences (user-linked or session-level defaults)
+    // Load preferences: prefer user-level for injectMemories; allow session to override listen/followup/transcribe
     let listenMode = 'TRIGGER';
     let followupWindowMs = 8000;
     let injectMemories = false;
@@ -1864,19 +1864,21 @@ if (!ENABLE_NEW_OMI_ROUTES) app.post('/omi-webhook', async (req, res) => {
     if (ENABLE_USER_SYSTEM && prisma) {
       try {
         const sessionRow = await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) }, include: { user: true, preferences: true } });
-        if (sessionRow && sessionRow.preferences) {
+        let userPref = null;
+        if (sessionRow?.user) {
+          userPref = await prisma.userPreference.findUnique({ where: { userId: sessionRow.user.id } });
+        }
+        if (userPref) {
+          listenMode = userPref.listenMode;
+          followupWindowMs = userPref.followupWindowMs;
+          injectMemories = userPref.injectMemories;
+          meetingTranscribe = userPref.meetingTranscribe;
+        }
+        if (sessionRow?.preferences) {
+          // Override selected fields from session preferences, but do not override injectMemories
           listenMode = sessionRow.preferences.listenMode;
           followupWindowMs = sessionRow.preferences.followupWindowMs;
-          injectMemories = sessionRow.preferences.injectMemories;
           meetingTranscribe = sessionRow.preferences.meetingTranscribe;
-        } else if (sessionRow && sessionRow.user) {
-          const pref = await prisma.userPreference.findUnique({ where: { userId: sessionRow.user.id } });
-          if (pref) {
-            listenMode = pref.listenMode;
-            followupWindowMs = pref.followupWindowMs;
-            injectMemories = pref.injectMemories;
-            meetingTranscribe = pref.meetingTranscribe;
-          }
         }
       } catch {}
     }
