@@ -725,7 +725,7 @@ try {
 }
 try {
   const createOmiRoutes = require('./routes/omi');
-  createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, ENABLE_USER_SYSTEM });
+  createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, ENABLE_USER_SYSTEM, backgroundQueue });
 } catch (e) {
   console.warn('OMI routes not initialized:', e?.message || e);
 }
@@ -735,9 +735,11 @@ try {
 } catch (e) {
   console.warn('Prompt routes not initialized:', e?.message || e);
 }
+let backgroundQueue = null;
 try {
   const { startBackgroundWorkers } = require('./services/workers');
   const workers = startBackgroundWorkers({ prisma, openai, logger: console });
+  backgroundQueue = workers.queue;
   process.on('SIGTERM', () => workers.stop());
   process.on('SIGINT', () => workers.stop());
 } catch (e) {
