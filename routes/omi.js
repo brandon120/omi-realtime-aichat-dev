@@ -134,6 +134,44 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
         return { status: 201, body: { ok: true, memory: { id: saved.id, text: saved.text, createdAt: saved.createdAt } } };
       }
 
+      async function persistTranscriptSegments(sessionIdForSegments, segmentsToPersist) {
+        if (!(ENABLE_USER_SYSTEM && prisma)) return;
+        if (!sessionIdForSegments || !Array.isArray(segmentsToPersist) || !segmentsToPersist.length) return;
+        const operations = segmentsToPersist
+          .map((seg) => {
+            if (!seg) return null;
+            const text = String(seg.text || '');
+            const omiSegmentId = String(seg.id || seg.segment_id || crypto.createHash('sha1').update(text).digest('hex'));
+            return prisma.transcriptSegment
+              .upsert({
+                where: { omiSessionId_omiSegmentId: { omiSessionId: sessionIdForSegments, omiSegmentId } },
+                update: {
+                  text,
+                  speaker: seg.speaker || null,
+                  speakerId: seg.speaker_id ?? seg.speakerId ?? null,
+                  isUser: seg.is_user ?? null,
+                  start: seg.start ?? null,
+                  end: seg.end ?? null
+                },
+                create: {
+                  omiSessionId: sessionIdForSegments,
+                  omiSegmentId,
+                  text,
+                  speaker: seg.speaker || null,
+                  speakerId: seg.speaker_id ?? seg.speakerId ?? null,
+                  isUser: seg.is_user ?? null,
+                  start: seg.start ?? null,
+                  end: seg.end ?? null
+                }
+              })
+              .catch((err) => {
+                console.error('Transcript segment upsert failed:', err);
+              });
+          })
+          .filter(Boolean);
+        await Promise.all(operations);
+      }
+
       // Transcript mode (existing behavior)
       const session_id = (req.query && req.query.session_id ? String(req.query.session_id) : (body && body.session_id ? String(body.session_id) : null));
       const segments = Array.isArray(body) ? body : (Array.isArray(body.segments) ? body.segments : []);
@@ -179,6 +217,7 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       if (!session_id) return res.status(400).json({ error: 'session_id required' });
 
       // Resolve any linked user/session metadata needed for context without blocking the response on writes.
+      let sessionRowId = null;
       let linkedUserId = null;
       let sessionRowCache = null;
       if (ENABLE_USER_SYSTEM && prisma) {
@@ -199,11 +238,48 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
           linkedUserId = sessionRowCache.userId;
         }
       }
+      sessionRowId = sessionRowCache?.id || sessionRowId;
+
+      const ensureSessionRow = async (extraUpdate = {}) => {
+        if (!(ENABLE_USER_SYSTEM && prisma)) return null;
+        const update = { lastSeenAt: new Date() };
+        const create = { omiSessionId: String(session_id), lastSeenAt: new Date() };
+        if (linkedUserId) {
+          update.userId = linkedUserId;
+          create.userId = linkedUserId;
+        }
+        for (const [key, value] of Object.entries(extraUpdate || {})) {
+          if (typeof value === 'undefined') continue;
+          update[key] = value;
+          create[key] = value;
+        }
+        const sessionRow = await prisma.omiSession.upsert({
+          where: { omiSessionId: String(session_id) },
+          update,
+          create
+        });
+        if (sessionRow) {
+          sessionRowCache = sessionRowCache ? { ...sessionRowCache, ...sessionRow } : sessionRow;
+          sessionRowId = sessionRow.id ?? sessionRowId;
+        }
+        return sessionRow;
+      };
 
       const { pref, regex } = await loadActivationConfig(session_id, linkedUserId, sessionRowCache);
 
-      // Meeting transcribe special mode: only persist (already done) and optionally return on end
+      // Meeting transcribe special mode: persist transcript segments immediately and optionally return on end
       if (pref.meetingTranscribe) {
+        if (ENABLE_USER_SYSTEM && prisma) {
+          try {
+            const sessionRow = await ensureSessionRow();
+            const sessionIdForSegments = sessionRow?.id || sessionRowId;
+            if (sessionIdForSegments) {
+              await persistTranscriptSegments(sessionIdForSegments, segments);
+            }
+          } catch (err) {
+            console.error('Meeting transcript persistence failed:', err);
+          }
+        }
         const endSignal = Boolean(req.body?.end || req.body?.final || req.body?.is_final) ||
           segments.some((s) => s?.end === true || s?.final === true || s?.is_final === true || s?.is_last_segment === true || s?.segment_type === 'end');
         if (!endSignal) return res.status(200).json({});
@@ -277,22 +353,42 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       ].filter(Boolean).join('\n\n');
 
       // Ensure conversation id is stored in OmiSession
-      let conversationId = null;
-      if (ENABLE_USER_SYSTEM && prisma) {
+      let conversationId = sessionRowCache?.openaiConversationId || null;
+      if (!conversationId && ENABLE_USER_SYSTEM && prisma) {
         try {
-          const sessionRow = sessionRowCache || await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
-          if (sessionRow && !sessionRowCache) sessionRowCache = sessionRow;
-          if (sessionRow && sessionRow.openaiConversationId) {
-            conversationId = sessionRow.openaiConversationId;
+          const refreshedSession = await prisma.omiSession.findUnique({
+            where: { omiSessionId: String(session_id) },
+            select: { id: true, userId: true, openaiConversationId: true }
+          });
+          if (refreshedSession) {
+            if (refreshedSession.openaiConversationId) {
+              conversationId = refreshedSession.openaiConversationId;
+            }
+            sessionRowId = refreshedSession.id || sessionRowId;
+            sessionRowCache = sessionRowCache ? { ...sessionRowCache, ...refreshedSession } : refreshedSession;
           }
-        } catch {}
+        } catch (err) {
+          console.error('Session refresh failed:', err);
+        }
       }
       if (!conversationId) {
         try {
           const conversation = await openai.conversations.create({ metadata: { omi_session_id: String(session_id) } });
           conversationId = conversation.id;
           if (sessionRowCache) sessionRowCache.openaiConversationId = conversationId;
-        } catch {}
+        } catch (err) {
+          console.error('OpenAI conversation create failed:', err);
+        }
+      }
+      if (ENABLE_USER_SYSTEM && prisma) {
+        try {
+          const sessionRow = await ensureSessionRow(conversationId ? { openaiConversationId: conversationId } : {});
+          if (sessionRow?.openaiConversationId) {
+            conversationId = sessionRow.openaiConversationId;
+          }
+        } catch (err) {
+          console.error('Session metadata persistence failed:', err);
+        }
       }
 
       // Call OpenAI
@@ -327,55 +423,41 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       if (ENABLE_USER_SYSTEM && prisma) {
         const backgroundSessionId = String(session_id);
         const backgroundSegments = Array.isArray(segments) ? segments.slice() : [];
-        const backgroundLinkedUserId = linkedUserId;
         const backgroundConversationId = conversationId ? String(conversationId) : null;
         const backgroundQuestion = question;
         const backgroundAiResponse = aiResponse;
+        const backgroundSessionRowId = sessionRowId;
+        const backgroundUserId = sessionRowCache?.userId || linkedUserId || null;
         setImmediate(async () => {
           try {
-            const sessionUpdate = { lastSeenAt: new Date() };
-            const sessionCreate = { omiSessionId: backgroundSessionId };
-            if (backgroundLinkedUserId) {
-              sessionUpdate.userId = backgroundLinkedUserId;
-              sessionCreate.userId = backgroundLinkedUserId;
-            }
-            if (backgroundConversationId) {
-              sessionUpdate.openaiConversationId = backgroundConversationId;
-              sessionCreate.openaiConversationId = backgroundConversationId;
-            }
-            const sessionRow = await prisma.omiSession.upsert({
-              where: { omiSessionId: backgroundSessionId },
-              update: sessionUpdate,
-              create: sessionCreate
-            });
-            const sessionRowId = sessionRow?.id;
+            let effectiveSessionRowId = backgroundSessionRowId;
+            let effectiveUserId = backgroundUserId;
 
-            if (sessionRowId && backgroundSegments.length) {
+            if (!effectiveSessionRowId) {
               try {
-                const operations = backgroundSegments.map((seg) => {
-                  if (!seg) return Promise.resolve();
-                  const text = String(seg.text || '');
-                  const omiSegmentId = String(seg.id || seg.segment_id || crypto.createHash('sha1').update(text).digest('hex'));
-                  return prisma.transcriptSegment.upsert({
-                    where: { omiSessionId_omiSegmentId: { omiSessionId: sessionRowId, omiSegmentId } },
-                    update: { text, speaker: seg.speaker || null, speakerId: (seg.speaker_id ?? seg.speakerId ?? null), isUser: seg.is_user ?? null, start: seg.start ?? null, end: seg.end ?? null },
-                    create: { omiSessionId: sessionRowId, omiSegmentId, text, speaker: seg.speaker || null, speakerId: (seg.speaker_id ?? seg.speakerId ?? null), isUser: seg.is_user ?? null, start: seg.start ?? null, end: seg.end ?? null }
-                  }).catch((err) => {
-                    console.error('Transcript segment upsert failed:', err);
-                  });
+                const refreshed = await prisma.omiSession.findUnique({
+                  where: { omiSessionId: backgroundSessionId },
+                  select: { id: true, userId: true }
                 });
-                await Promise.all(operations);
+                if (refreshed) {
+                  effectiveSessionRowId = refreshed.id;
+                  if (refreshed.userId) effectiveUserId = refreshed.userId;
+                }
               } catch (err) {
-                console.error('Background transcript persistence failed:', err);
+                console.error('Background session lookup failed:', err);
               }
             }
 
-            if (sessionRowId && backgroundConversationId) {
+            if (effectiveSessionRowId && backgroundSegments.length) {
+              await persistTranscriptSegments(effectiveSessionRowId, backgroundSegments);
+            }
+
+            if (effectiveSessionRowId && backgroundConversationId) {
               try {
                 const conversationRow = await prisma.conversation.upsert({
-                  where: { omiSessionId_openaiConversationId: { omiSessionId: sessionRowId, openaiConversationId: backgroundConversationId } },
+                  where: { omiSessionId_openaiConversationId: { omiSessionId: effectiveSessionRowId, openaiConversationId: backgroundConversationId } },
                   update: {},
-                  create: { omiSessionId: sessionRowId, openaiConversationId: backgroundConversationId }
+                  create: { omiSessionId: effectiveSessionRowId, openaiConversationId: backgroundConversationId }
                 });
                 if (backgroundQuestion) {
                   await prisma.message.create({ data: { conversationId: conversationRow.id, role: 'USER', text: backgroundQuestion, source: 'OMI_TRANSCRIPT' } });
@@ -383,18 +465,28 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
                 if (backgroundAiResponse) {
                   await prisma.message.create({ data: { conversationId: conversationRow.id, role: 'ASSISTANT', text: backgroundAiResponse, source: 'SYSTEM' } });
                 }
-                if (sessionRow.userId) {
-                  const userId = sessionRow.userId;
-                  let active = await prisma.userContextWindow.findFirst({ where: { userId, isActive: true } });
+                if (!effectiveUserId) {
+                  try {
+                    const refreshedUser = await prisma.omiSession.findUnique({
+                      where: { id: effectiveSessionRowId },
+                      select: { userId: true }
+                    });
+                    if (refreshedUser?.userId) effectiveUserId = refreshedUser.userId;
+                  } catch (err) {
+                    console.error('Background user lookup failed:', err);
+                  }
+                }
+                if (effectiveUserId) {
+                  let active = await prisma.userContextWindow.findFirst({ where: { userId: effectiveUserId, isActive: true } });
                   if (!active) {
-                    const existingSlot1 = await prisma.userContextWindow.findUnique({ where: { userId_slot: { userId, slot: 1 } } });
+                    const existingSlot1 = await prisma.userContextWindow.findUnique({ where: { userId_slot: { userId: effectiveUserId, slot: 1 } } });
                     if (!existingSlot1) {
-                      await prisma.userContextWindow.create({ data: { userId, slot: 1, conversationId: conversationRow.id, isActive: true } });
+                      await prisma.userContextWindow.create({ data: { userId: effectiveUserId, slot: 1, conversationId: conversationRow.id, isActive: true } });
                     } else {
-                      await prisma.userContextWindow.update({ where: { userId_slot: { userId, slot: 1 } }, data: { conversationId: conversationRow.id, isActive: true } });
+                      await prisma.userContextWindow.update({ where: { userId_slot: { userId: effectiveUserId, slot: 1 } }, data: { conversationId: conversationRow.id, isActive: true } });
                     }
                   } else {
-                    await prisma.userContextWindow.update({ where: { userId_slot: { userId, slot: active.slot } }, data: { conversationId: conversationRow.id } });
+                    await prisma.userContextWindow.update({ where: { userId_slot: { userId: effectiveUserId, slot: active.slot } }, data: { conversationId: conversationRow.id } });
                   }
                 }
               } catch (err) {
@@ -402,7 +494,7 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
               }
             }
           } catch (err) {
-            console.error('Background session persistence failed:', err);
+            console.error('Background persistence failed:', err);
           }
         });
       }
