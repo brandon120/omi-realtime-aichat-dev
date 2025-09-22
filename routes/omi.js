@@ -374,6 +374,7 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
         try {
           const conversation = await openai.conversations.create({ metadata: { omi_session_id: String(session_id) } });
           conversationId = conversation.id;
+          if (sessionRowCache) sessionRowCache.openaiConversationId = conversationId;
         } catch (err) {
           console.error('OpenAI conversation create failed:', err);
         }
