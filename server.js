@@ -717,6 +717,18 @@ const OPENAI_MODEL = "gpt-5-mini-2025-08-07"; // Smaller/cheaper, supports conve
 console.log('✅ Using OpenAI Responses API with Conversations');
 
 // Attach modular routes
+// Initialize background queue first
+let backgroundQueue = null;
+try {
+  const { startBackgroundWorkers } = require('./services/workers');
+  const workers = startBackgroundWorkers({ prisma, openai, logger: console });
+  backgroundQueue = workers.queue;
+  process.on('SIGTERM', () => workers.stop());
+  process.on('SIGINT', () => workers.stop());
+} catch (e) {
+  console.warn('Workers not started:', e?.message || e);
+}
+
 try {
   const createRealtimeRouter = require('./routes/realtime');
   createRealtimeRouter({ app, prisma, ENABLE_USER_SYSTEM });
@@ -734,16 +746,6 @@ try {
   createPromptRoutes({ app, prisma, openai, OPENAI_MODEL });
 } catch (e) {
   console.warn('Prompt routes not initialized:', e?.message || e);
-}
-let backgroundQueue = null;
-try {
-  const { startBackgroundWorkers } = require('./services/workers');
-  const workers = startBackgroundWorkers({ prisma, openai, logger: console });
-  backgroundQueue = workers.queue;
-  process.on('SIGTERM', () => workers.stop());
-  process.on('SIGINT', () => workers.stop());
-} catch (e) {
-  console.warn('Workers not started:', e?.message || e);
 }
 
 /**
