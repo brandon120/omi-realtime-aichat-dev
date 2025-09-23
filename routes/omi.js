@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const { buildActivationRegex, withinQuietHours, normalizeText, isNearDuplicate } = require('../services/activation');
 const { ENABLE_CONTEXT_ACTIVATION, QUIET_HOURS_ENABLED } = require('../featureFlags');
+const config = require('../config/config');
 
 module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, ENABLE_USER_SYSTEM, backgroundQueue }) {
   if (!app) throw new Error('app is required');
