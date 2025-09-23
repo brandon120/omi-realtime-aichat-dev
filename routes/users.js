@@ -152,13 +152,14 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     });
     
     res.status(201).json({
+      ok: true,
+      session_token: sid,
       user: {
         id: user.id,
         email: user.email,
-        name: user.name,
+        displayName: user.name,
         createdAt: user.createdAt
-      },
-      sid
+      }
     });
   }));
   
@@ -212,13 +213,14 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     });
     
     res.json({
+      ok: true,
+      session_token: sid,
       user: {
         id: user.id,
         email: user.email,
-        name: user.name,
+        displayName: user.name,
         createdAt: user.createdAt
-      },
-      sid
+      }
     });
   }));
   
@@ -270,6 +272,33 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     });
   }));
   
+  // GET /me - Get current user (Expo app compatibility)
+  app.get('/me', requireAuth, asyncHandler(async (req, res) => {
+    const [user, links] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: req.user.id }
+      }),
+      prisma.omiUserLink.findMany({
+        where: { userId: req.user.id },
+        select: { omiUserId: true, isVerified: true, verifiedAt: true }
+      }).catch(() => []) // Gracefully handle if table doesn't exist
+    ]);
+    
+    if (!user) {
+      throw new NotFoundError('User', req.user.id);
+    }
+    
+    res.json({
+      ok: true,
+      user: {
+        id: user.id,
+        email: user.email,
+        displayName: user.name || user.displayName
+      },
+      omi_links: links
+    });
+  }));
+  
   // GET /preferences - Get user preferences
   app.get('/preferences', requireAuth, asyncHandler(async (req, res) => {
     const preferences = await prisma.userPreference.findUnique({
@@ -287,28 +316,28 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
       activationRegex: config.getValue('userDefaults.activationRegex')
     };
     
-    res.json(preferences || defaults);
+    res.json({
+      ok: true,
+      preferences: preferences || defaults
+    });
   }));
   
-  // PUT /preferences - Update user preferences
-  app.put('/preferences', requireAuth, asyncHandler(async (req, res) => {
-    const allowedFields = [
-      'listenMode',
-      'followupWindowMs',
-      'meetingTranscribe',
-      'injectMemories',
-      'quietHoursEnabled',
-      'quietHoursStart',
-      'quietHoursEnd',
-      'activationRegex'
-    ];
-    
+  // PATCH /preferences - Update user preferences (Expo app uses PATCH with snake_case)
+  app.patch('/preferences', requireAuth, asyncHandler(async (req, res) => {
+    const body = req.body || {};
     const updates = {};
-    for (const field of allowedFields) {
-      if (field in req.body) {
-        updates[field] = req.body[field];
-      }
-    }
+    
+    // Map snake_case fields from Expo app to camelCase for database
+    if (typeof body.listen_mode === 'string') updates.listenMode = body.listen_mode.toUpperCase();
+    if (typeof body.followup_window_ms === 'number') updates.followupWindowMs = body.followup_window_ms;
+    if (typeof body.meeting_transcribe === 'boolean') updates.meetingTranscribe = body.meeting_transcribe;
+    if (typeof body.inject_memories === 'boolean') updates.injectMemories = body.inject_memories;
+    if (typeof body.activation_regex === 'string') updates.activationRegex = body.activation_regex;
+    if (typeof body.activation_sensitivity === 'number') updates.activationSensitivity = body.activation_sensitivity;
+    if (typeof body.mute === 'boolean') updates.mute = body.mute;
+    if (typeof body.dnd_quiet_hours_start === 'string') updates.quietHoursStart = parseInt(body.dnd_quiet_hours_start);
+    if (typeof body.dnd_quiet_hours_end === 'string') updates.quietHoursEnd = parseInt(body.dnd_quiet_hours_end);
+    if ('default_conversation_id' in body) updates.defaultConversationId = body.default_conversation_id;
     
     // Validation
     if (updates.listenMode && !['TRIGGER', 'FOLLOWUP', 'ALWAYS'].includes(updates.listenMode)) {
@@ -341,7 +370,16 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
       updates: Object.keys(updates)
     });
     
-    res.json(preferences);
+    res.json({
+      ok: true,
+      preferences
+    });
+  }));
+  
+  // PUT /preferences - Also support PUT for compatibility
+  app.put('/preferences', requireAuth, asyncHandler(async (req, res) => {
+    // Delegate to PATCH handler
+    req.app._router.handle(Object.assign(req, { method: 'PATCH' }), res, () => {});
   }));
   
   // GET /memories - Get user memories
