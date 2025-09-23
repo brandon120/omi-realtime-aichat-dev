@@ -14,6 +14,8 @@ import {
   apiMe,
   apiListWindows,
   apiSyncOmiConversations,
+  apiGetCurrentConversation,
+  apiStreamCurrentConversation,
   type MessageItem
 } from '@/lib/api';
 // Slash commands use apiSwitchSpace/apiActivateWindow/apiCreateMemory/apiCreateTask/apiCreateFollowup
@@ -47,6 +49,28 @@ export default function ChatScreen() {
 
   async function ensureActiveConversation(): Promise<void> {
     try {
+      // First, try to get the current conversation from the user's session
+      const current = await apiGetCurrentConversation();
+      if (current?.conversation?.id) {
+        setSelectedId(current.conversation.id);
+        
+        // Load initial messages if available
+        if (current.messages && current.messages.length > 0) {
+          setMessages((prev: MessageState) => ({
+            byConversationId: {
+              ...prev.byConversationId,
+              [current.conversation.id]: {
+                items: current.messages,
+                nextCursor: null,
+                loading: false
+              }
+            }
+          }));
+        }
+        return;
+      }
+      
+      // Fallback to windows approach if no current conversation
       const windows = await apiListWindows();
       let active = windows.find((w: any) => w.isActive && w.conversationId);
       if (!active || !active.conversationId) {
@@ -127,15 +151,80 @@ export default function ChatScreen() {
   }
 
   useEffect(() => { 
+    let streamCleanup: (() => void) | null = null;
+    
     (async () => {
       await ensureActiveConversation();
       const me = await apiMe();
       const verified = (me?.omi_links || []).some((l: any) => l.isVerified);
       setHasOmiLink(!!verified);
+      
+      // Set up live streaming for current conversation
+      streamCleanup = apiStreamCurrentConversation(
+        (event) => {
+          if (event.type === 'conversation_changed' && event.conversationId) {
+            // Conversation changed, update selected ID
+            setSelectedId(event.conversationId);
+            // Load messages for new conversation
+            loadLatest(event.conversationId, { reset: true });
+          } else if (event.type === 'new_messages' && event.messages && selectedId) {
+            // New messages received
+            setMessages((prev: MessageState) => {
+              const existing = prev.byConversationId[selectedId]?.items || [];
+              const existingIds = new Set(existing.map(m => m.id));
+              const newMessages = event.messages.filter((m: MessageItem) => !existingIds.has(m.id));
+              
+              if (newMessages.length > 0) {
+                return {
+                  byConversationId: {
+                    ...prev.byConversationId,
+                    [selectedId]: {
+                      ...prev.byConversationId[selectedId],
+                      items: [...existing, ...newMessages]
+                    }
+                  }
+                };
+              }
+              return prev;
+            });
+            
+            // Auto-scroll to bottom if user is already at bottom
+            if (isAtBottom && listRef.current) {
+              setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
+            }
+          } else if (event.type === 'update' && event.conversation) {
+            // Full update received (polling fallback)
+            if (event.conversation.id) {
+              setSelectedId(event.conversation.id);
+              if (event.messages) {
+                setMessages((prev: MessageState) => ({
+                  byConversationId: {
+                    ...prev.byConversationId,
+                    [event.conversation.id]: {
+                      items: event.messages,
+                      nextCursor: null,
+                      loading: false
+                    }
+                  }
+                }));
+              }
+            }
+          }
+        },
+        (error) => {
+          console.warn('Live stream error:', error);
+        }
+      );
     })();
+    
+    // Keep the window polling as a backup
     if (windowsPollRef.current) clearInterval(windowsPollRef.current);
-    windowsPollRef.current = setInterval(ensureActiveConversation, 10000);
-    return () => { if (windowsPollRef.current) clearInterval(windowsPollRef.current); };
+    windowsPollRef.current = setInterval(ensureActiveConversation, 30000); // Reduced frequency since we have streaming
+    
+    return () => { 
+      if (windowsPollRef.current) clearInterval(windowsPollRef.current);
+      if (streamCleanup) streamCleanup();
+    };
   }, []);
 
   useEffect(() => {

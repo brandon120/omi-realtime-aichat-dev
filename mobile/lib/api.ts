@@ -212,6 +212,15 @@ export async function apiSyncOmiConversations(): Promise<{ ok: boolean; message?
   return null;
 }
 
+export async function apiLinkSession(session_id: string): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.post('/sessions/link', { session_id });
+    return !!(data && data.ok);
+  } catch {}
+  return false;
+}
+
 // Conversations & Messages
 export type ConversationItem = {
   id: string;
@@ -222,6 +231,85 @@ export type ConversationItem = {
   omiSessionKey?: string | null;
 };
 export type MessageItem = { id: string; role: 'USER' | 'ASSISTANT' | 'SYSTEM' | 'TOOL'; text: string; source: string; createdAt: string };
+
+export async function apiGetCurrentConversation(): Promise<{ 
+  conversation: ConversationItem | null; 
+  messages: MessageItem[]; 
+  sessionId: string | null 
+} | null> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.get('/conversations/current');
+    if (data && data.ok) return data;
+  } catch {}
+  return null;
+}
+
+export function apiStreamCurrentConversation(
+  onMessage: (event: { type: string; [key: string]: any }) => void,
+  onError?: (error: Error) => void
+): () => void {
+  // Create an EventSource for Server-Sent Events
+  const baseUrl = getApiBaseUrl();
+  
+  // Get the session token
+  let cancelled = false;
+  let eventSource: EventSource | null = null;
+  
+  (async () => {
+    const token = await getSessionToken();
+    if (cancelled) return;
+    
+    // EventSource doesn't support custom headers, so we'll use query param for auth
+    const url = `${baseUrl}/conversations/current/stream?sid=${encodeURIComponent(token || '')}`;
+    
+    try {
+      // For React Native, we might need to use a polyfill or alternative approach
+      // For now, we'll use polling as a fallback
+      if (typeof EventSource === 'undefined') {
+        // Fallback to polling
+        const pollInterval = setInterval(async () => {
+          try {
+            const current = await apiGetCurrentConversation();
+            if (current) {
+              onMessage({ type: 'update', ...current });
+            }
+          } catch (error) {
+            if (onError) onError(error as Error);
+          }
+        }, 3000);
+        
+        // Return cleanup function
+        eventSource = { close: () => clearInterval(pollInterval) } as any;
+      } else {
+        eventSource = new EventSource(url);
+        
+        eventSource.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            onMessage(data);
+          } catch (error) {
+            if (onError) onError(error as Error);
+          }
+        };
+        
+        eventSource.onerror = (error) => {
+          if (onError) onError(new Error('SSE connection failed'));
+        };
+      }
+    } catch (error) {
+      if (onError) onError(error as Error);
+    }
+  })();
+  
+  // Return cleanup function
+  return () => {
+    cancelled = true;
+    if (eventSource) {
+      eventSource.close();
+    }
+  };
+}
 
 export async function apiListConversations(limit: number = 20, cursor?: string): Promise<{ items: ConversationItem[]; nextCursor: string | null }> {
   const client = createApiClient();

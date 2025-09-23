@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const { buildActivationRegex, withinQuietHours, normalizeText, isNearDuplicate } = require('../services/activation');
 const { ENABLE_CONTEXT_ACTIVATION, QUIET_HOURS_ENABLED } = require('../featureFlags');
+const config = require('../config/config');
 
 module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, ENABLE_USER_SYSTEM, backgroundQueue }) {
   if (!app) throw new Error('app is required');
@@ -96,9 +97,13 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
     const responseTimeout = setTimeout(() => {
       if (!res.headersSent) {
         console.warn('Webhook timeout - sending early response');
-        res.status(200).json({ message: "Processing your request...", processing: true });
+        res.status(200).json({ 
+          message: "I'm here! Give me a moment to think...", 
+          help_response: "You can talk to me naturally!", 
+          instructions: "Ask questions naturally or use 'Hey Omi' to be explicit." 
+        });
       }
-    }, 25000); // Respond at 25 seconds to avoid 499 errors
+    }, 12000); // Respond at 12 seconds max
     
     try {
       // Combined payload support: can include both transcript segments and memory data
@@ -223,6 +228,38 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
             linkedUserId = sessionRowCache.userId;
           }
         }
+        
+        // Always create or update OMI session (with or without user linkage)
+        try {
+          const sessionData = await prisma.omiSession.upsert({
+            where: { omiSessionId: String(session_id) },
+            update: { 
+              userId: linkedUserId || undefined, // Only update if we have a userId
+              lastSeenAt: new Date()
+            },
+            create: {
+              omiSessionId: String(session_id),
+              userId: linkedUserId || null,
+              lastSeenAt: new Date()
+            },
+            include: { user: true, preferences: true }
+          });
+          sessionRowCache = sessionData;
+          
+          // If session has a userId but we didn't have linkedUserId, use it
+          if (!linkedUserId && sessionData.userId) {
+            linkedUserId = sessionData.userId;
+          }
+          
+          // Update cache
+          const cacheKey = `${session_id}-${linkedUserId || 'null'}`;
+          sessionCache.set(cacheKey, { 
+            data: { sessionRow: sessionData, linkedUserId }, 
+            timestamp: Date.now() 
+          });
+        } catch (err) {
+          console.warn('Failed to upsert OMI session:', err.message);
+        }
       }
 
       const { pref, regex } = await loadActivationConfig(session_id, linkedUserId, sessionRowCache);
@@ -295,70 +332,263 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
           }).then(mems => {
             const context = mems.map((m) => `- ${m.text}`).join('\n');
             return context.length > 2000 ? context.slice(0, 2000) : context;
-          }).catch(() => '');
+          }).catch((err) => {
+            console.warn('Failed to fetch memories:', err.message);
+            return '';
+          });
         }
       }
-      const sysInstructions = [
-        'You are Omi, a friendly, practical assistant. Keep replies concise.',
-        memoryContext ? `Relevant memories:\n${memoryContext}` : ''
-      ].filter(Boolean).join('\n\n');
-
-      // Ensure conversation id is stored in OmiSession
-      let conversationId = sessionRowCache?.openaiConversationId || null;
       
-      // Create conversation if needed (parallel with memory fetch)
-      const conversationPromise = conversationId ? 
-        Promise.resolve(conversationId) : 
-        openai.conversations.create({ metadata: { omi_session_id: String(session_id) } })
-          .then(conv => {
-            conversationId = conv.id;
-            if (sessionRowCache) sessionRowCache.openaiConversationId = conversationId;
-            return conversationId;
-          })
-          .catch(() => null);
+      // Manage conversation state for continuity
+      let conversationId = sessionRowCache?.openaiConversationId || null;
+      let previousResponseId = sessionRowCache?.lastResponseId || null;
+      
+      console.log('Session state:', {
+        sessionId: session_id,
+        hasSessionRow: !!sessionRowCache,
+        conversationId,
+        previousResponseId,
+        userId: sessionRowCache?.userId || linkedUserId
+      });
+      
+      // Create or retrieve conversation (parallel with memory fetch)
+      const conversationPromise = (async () => {
+        try {
+          // Check if conversations API is available
+          if (openai.beta && openai.beta.conversations) {
+            if (!conversationId) {
+              // Create new conversation
+              const conv = await openai.beta.conversations.create({ 
+                metadata: { 
+                  omi_session_id: String(session_id),
+                  created_at: new Date().toISOString()
+                } 
+              });
+              conversationId = conv.id;
+              if (sessionRowCache) {
+                sessionRowCache.openaiConversationId = conversationId;
+                // Persist to database for future requests
+                if (prisma && sessionRowCache.id) {
+                  prisma.omiSession.update({
+                    where: { id: sessionRowCache.id },
+                    data: { openaiConversationId: conversationId }
+                  }).catch(err => console.warn('Failed to update conversationId:', err.message));
+                }
+              }
+              console.log(`Created new conversation: ${conversationId}`);
+            } else {
+              console.log(`Using existing conversation: ${conversationId}`);
+            }
+            return { conversationId, previousResponseId };
+          } else {
+            console.log('Conversations API not available, using stateless mode');
+            return { conversationId: null, previousResponseId: null };
+          }
+        } catch (err) {
+          console.warn('Failed to manage conversation:', err.message);
+          return { conversationId: null, previousResponseId: null };
+        }
+      })();
       
       // Wait for parallel operations
-      const [memoryContext, finalConversationId] = await Promise.all([
+      const [memoryContext, conversationState] = await Promise.all([
         memoryContextPromise,
         conversationPromise
       ]);
       
-      if (finalConversationId) conversationId = finalConversationId;
+      if (conversationState) {
+        conversationId = conversationState.conversationId;
+        previousResponseId = conversationState.previousResponseId;
+      }
+      
+      // Get recent conversation history for context
+      let conversationHistory = '';
+      const includeHistory = config.getValue('openai.conversationState.includeHistory', true);
+      const historyMessages = config.getValue('openai.conversationState.historyMessages', 10);
+      
+      if (includeHistory && ENABLE_USER_SYSTEM && prisma && sessionRowCache?.id) {
+        try {
+          // Find conversations for this session
+          const recentConversation = await prisma.conversation.findFirst({
+            where: {
+              OR: [
+                { omiSessionId: sessionRowCache.id },
+                { openaiConversationId: conversationId }
+              ].filter(Boolean)
+            },
+            orderBy: { createdAt: 'desc' },
+            include: {
+              messages: {
+                orderBy: { createdAt: 'desc' },
+                take: historyMessages
+              }
+            }
+          });
+          
+          if (recentConversation?.messages?.length > 0) {
+            // Format recent messages for context
+            const recentMessages = recentConversation.messages
+              .reverse() // Put in chronological order
+              .map(msg => `${msg.role}: ${msg.text.substring(0, 200)}`)
+              .join('\n');
+            conversationHistory = `Recent conversation:\n${recentMessages}`;
+            console.log(`Loaded ${recentConversation.messages.length} messages for context`);
+          }
+        } catch (err) {
+          console.warn('Failed to load conversation history:', err.message);
+        }
+      }
+      
+      // Build system instructions with optimized context
+      // Keep instructions concise to save tokens while maintaining context
+      const maxContextTokens = config.getValue('openai.conversationState.maxContextTokens', 500);
+      const baseInstructions = 'You are Omi, a friendly, practical assistant. Keep replies concise.';
+      
+      // Combine all context sources
+      const contextParts = [];
+      if (conversationHistory) {
+        contextParts.push(conversationHistory.slice(0, maxContextTokens * 2)); // Allow more tokens for conversation
+      }
+      if (memoryContext) {
+        contextParts.push(`Memories: ${memoryContext.slice(0, maxContextTokens)}`);
+      }
+      
+      const contextInstructions = contextParts.join('\n\n');
+      
+      const sysInstructions = [baseInstructions, contextInstructions]
+        .filter(Boolean)
+        .join('\n');
 
       // Call OpenAI with timeout to prevent long delays
       let aiResponse = '';
+      let newResponseId = null;
+      const webhookTimeout = config.getValue('openai.conversationState.webhookTimeout', 8000);
       const openaiTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('OpenAI timeout')), 20000)
+        setTimeout(() => reject(new Error('OpenAI timeout')), webhookTimeout)
       );
       
+      const openaiStartTime = Date.now();
       try {
-        const requestPayload = { model: OPENAI_MODEL, input: question };
-        if (conversationId) requestPayload.conversation = conversationId;
-        if (sysInstructions) requestPayload.instructions = sysInstructions;
+        const modelToUse = OPENAI_MODEL || 'gpt-4o-mini';
         
-        const response = await Promise.race([
-          openai.responses.create(requestPayload),
-          openaiTimeout
-        ]);
-        aiResponse = response.output_text;
+        // Check if we have the responses API available
+        if (openai.beta && openai.beta.responses) {
+          console.log(`Calling OpenAI Responses API with model: ${modelToUse}`);
+          
+          // Build the request payload for Responses API with conversation state
+          const webhookMaxTokens = config.getValue('openai.conversationState.webhookMaxTokens', 300);
+          const storeResponses = config.getValue('openai.conversationState.storeResponses', true);
+          
+          const requestPayload = {
+            model: modelToUse,
+            input: question,
+            instructions: sysInstructions || 'You are Omi, a helpful assistant. Keep replies concise.',
+            max_tokens: webhookMaxTokens,
+            temperature: 0.7,
+            store: storeResponses // Store to maintain conversation state
+          };
+          
+          // Use conversation state for continuity
+          if (previousResponseId) {
+            // Chain with previous response for context continuity
+            requestPayload.previous_response_id = previousResponseId;
+            console.log(`Chaining with previous response: ${previousResponseId}`);
+          } else if (conversationId) {
+            // Use conversation ID if no previous response
+            requestPayload.conversation = conversationId;
+            console.log(`Using conversation: ${conversationId}`);
+          }
+          
+          const response = await Promise.race([
+            openai.beta.responses.create(requestPayload),
+            openaiTimeout
+          ]);
+          
+          const responseTime = Date.now() - openaiStartTime;
+          console.log(`OpenAI Responses API responded in ${responseTime}ms`);
+          
+      // Store the response ID for next interaction
+      newResponseId = response.id;
+      if (sessionRowCache && newResponseId) {
+        sessionRowCache.lastResponseId = newResponseId;
+        // Persist to database for future requests
+        if (prisma && sessionRowCache.id) {
+          prisma.omiSession.update({
+            where: { id: sessionRowCache.id },
+            data: { lastResponseId: newResponseId }
+          }).catch(err => console.warn('Failed to update lastResponseId:', err.message));
+        }
+      }
+          
+          if (responseTime > 5000) {
+            console.warn(`Slow OpenAI response: ${responseTime}ms for model ${modelToUse}`);
+          }
+          
+          // Responses API returns output_text directly
+          aiResponse = response.output_text || '';
+        } else {
+          // Fallback to Chat Completions API
+          console.log(`Using Chat Completions API with model: ${modelToUse}`);
+          
+          const webhookMaxTokens = config.getValue('openai.conversationState.webhookMaxTokens', 500);
+          
+          const messages = [
+            { role: 'system', content: sysInstructions || 'You are Omi, a helpful assistant. Keep replies concise.' },
+            { role: 'user', content: question }
+          ];
+          
+          const response = await Promise.race([
+            openai.chat.completions.create({
+              model: modelToUse,
+              messages,
+              max_tokens: webhookMaxTokens,
+              temperature: 0.7,
+              presence_penalty: 0.1,
+              frequency_penalty: 0.1
+            }),
+            openaiTimeout
+          ]);
+          
+          const responseTime = Date.now() - openaiStartTime;
+          console.log(`OpenAI Chat Completions responded in ${responseTime}ms`);
+          
+          if (responseTime > 5000) {
+            console.warn(`Slow OpenAI response: ${responseTime}ms for model ${modelToUse}`);
+          }
+          
+          aiResponse = response.choices?.[0]?.message?.content || '';
+        }
       } catch (e) {
         if (e.message === 'OpenAI timeout') {
-          console.warn('OpenAI request timed out, using fallback');
+          console.warn('OpenAI request timed out after 8s');
           aiResponse = "I'm processing your request. Please try again in a moment.";
         } else {
+          console.error('OpenAI error:', e.message);
+          console.error('Error details:', e.response?.data || e.response?.statusText || 'No additional details');
+          
+          // Try with faster model as fallback
           try {
+            const fallbackStartTime = Date.now();
+            console.log('Attempting fallback with gpt-3.5-turbo');
+            
             const resp = await Promise.race([
               openai.chat.completions.create({
-                model: 'gpt-4o-mini', // Use faster model for fallback
-                messages: [ { role: 'system', content: sysInstructions || 'You are a helpful assistant.' }, { role: 'user', content: question } ],
-                max_tokens: 500,
+                model: 'gpt-3.5-turbo', // Faster fallback model
+                messages: [ 
+                  { role: 'system', content: 'You are a helpful assistant. Be very concise.' }, 
+                  { role: 'user', content: question } 
+                ],
+                max_tokens: 150, // Even less tokens for speed
                 temperature: 0.7
               }),
-              openaiTimeout
+              new Promise((_, reject) => setTimeout(() => reject(new Error('Fallback timeout')), 3000))
             ]);
+            console.log(`Fallback model responded in ${Date.now() - fallbackStartTime}ms`);
             aiResponse = resp.choices?.[0]?.message?.content || '';
-          } catch {
-            aiResponse = "I'm sorry, please try again later.";
+          } catch (fallbackError) {
+            console.error('Fallback OpenAI error:', fallbackError.message);
+            console.error('Fallback error details:', fallbackError.response?.data || fallbackError.response?.statusText || 'No additional details');
+            aiResponse = "I'm having trouble right now. Please try again.";
           }
         }
       }

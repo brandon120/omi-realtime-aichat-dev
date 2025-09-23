@@ -1,9 +1,11 @@
 'use strict';
 
 const { ENABLE_USER_SYSTEM } = require('../featureFlags');
+const { logger } = require('./logger');
+const { QueueError } = require('../utils/errors');
 
 class BackgroundQueue {
-  constructor({ prisma, logger = console }) {
+  constructor({ prisma }) {
     this.prisma = prisma;
     this.logger = logger;
     this.jobs = [];
@@ -17,12 +19,15 @@ class BackgroundQueue {
 
   // Add job to queue
   enqueue(job) {
-    this.jobs.push({
+    const jobWithId = {
       ...job,
       id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       timestamp: Date.now()
+    };
+    this.jobs.push(jobWithId);
+    this.logger.logQueue('enqueue', job.type, jobWithId.id, { 
+      queueLength: this.jobs.length 
     });
-    this.logger.log(`Job enqueued: ${job.type} (${this.jobs.length} jobs in queue)`);
   }
 
   // Process jobs in batches with parallel execution
@@ -45,7 +50,10 @@ class BackgroundQueue {
         );
       }
     } catch (error) {
-      this.logger.error('Batch processing error:', error);
+      this.logger.error('Batch processing error', { 
+        error: error.message,
+        batchSize: batch.length 
+      });
     } finally {
       this.processing = false;
     }
@@ -58,8 +66,15 @@ class BackgroundQueue {
     try {
       await this.executeJob(job);
       this.jobRetries.delete(job.id); // Clear on success
+      this.logger.logQueue('process', job.type, job.id, { 
+        success: true,
+        attempt: retryCount + 1 
+      });
     } catch (error) {
-      this.logger.error(`Job execution failed (${job.type}, attempt ${retryCount + 1}):`, error);
+      this.logger.logQueue('failed', job.type, job.id, {
+        attempt: retryCount + 1,
+        willRetry: retryCount < this.maxRetries
+      }, error);
       
       if (retryCount < this.maxRetries) {
         this.jobRetries.set(job.id, retryCount + 1);
@@ -68,7 +83,11 @@ class BackgroundQueue {
           this.jobs.push(job);
         }, Math.min(1000 * Math.pow(2, retryCount), 30000));
       } else {
-        this.logger.error(`Job ${job.id} failed after ${this.maxRetries} retries`);
+        this.logger.error(`Job permanently failed after ${this.maxRetries} retries`, {
+          jobId: job.id,
+          jobType: job.type,
+          retries: this.maxRetries
+        });
         this.jobRetries.delete(job.id);
       }
     }
@@ -96,12 +115,17 @@ class BackgroundQueue {
           await this.updateContextWindow(job.data);
           break;
         default:
-          this.logger.warn(`Unknown job type: ${job.type}`);
+          this.logger.warn('Unknown job type', { jobType: job.type, jobId: job.id });
       }
       
       const duration = Date.now() - startTime;
       if (duration > 1000) {
-        this.logger.warn(`Slow job execution (${job.type}): ${duration}ms`);
+        this.logger.warn('Slow job execution', {
+          jobType: job.type,
+          jobId: job.id,
+          duration: `${duration}ms`,
+          threshold: '1000ms'
+        });
       }
     } catch (error) {
       throw error; // Re-throw for retry logic
@@ -119,14 +143,22 @@ class BackgroundQueue {
     });
     
     if (dupe) {
-      this.logger.log(`Memory deduplicated: ${dupe.id}`);
+      this.logger.debug('Memory deduplicated', { 
+        memoryId: dupe.id,
+        userId,
+        textLength: text.length 
+      });
       return;
     }
     
     const saved = await this.prisma.memory.create({ 
       data: { userId, text } 
     });
-    this.logger.log(`Memory saved: ${saved.id}`);
+    this.logger.info('Memory saved', { 
+      memoryId: saved.id,
+      userId,
+      textLength: text.length 
+    });
   }
 
   // Session update job
@@ -151,7 +183,12 @@ class BackgroundQueue {
       create: sessionCreate
     });
     
-    this.logger.log(`Session updated: ${sessionRow.id}`);
+    this.logger.debug('Session updated', { 
+      sessionId: sessionRow.id,
+      omiSessionId: sessionId,
+      hasUser: !!userId,
+      hasConversation: !!conversationId 
+    });
     return sessionRow;
   }
 
@@ -165,7 +202,10 @@ class BackgroundQueue {
     });
     
     if (!sessionRow) {
-      this.logger.warn(`Session not found for transcript batch: ${sessionId}`);
+      this.logger.warn('Session not found for transcript batch', { 
+        sessionId,
+        segmentCount: segments?.length || 0 
+      });
       return;
     }
     
@@ -206,12 +246,20 @@ class BackgroundQueue {
         
         await Promise.all(operations);
       }).catch((err) => {
-        this.logger.error(`Transcript chunk upsert failed (${i}-${i + chunkSize}):`, err);
+        this.logger.error('Transcript chunk upsert failed', {
+          sessionId,
+          chunkRange: `${i}-${i + chunkSize}`,
+          error: err.message
+        });
         throw err; // Re-throw for retry logic
       });
     }
     
-    this.logger.log(`Batch transcript upserts completed: ${segments.length} segments`);
+    this.logger.info('Batch transcript upserts completed', {
+      sessionId,
+      segmentCount: segments.length,
+      chunksProcessed: Math.ceil(segments.length / chunkSize)
+    });
   }
 
   // Conversation save job
@@ -223,14 +271,26 @@ class BackgroundQueue {
     });
     
     if (!sessionRow) {
-      this.logger.warn(`Session not found for conversation save: ${sessionId}`);
+      this.logger.warn('Session not found for conversation save', { 
+        sessionId,
+        conversationId 
+      });
       return;
     }
     
     const conversationRow = await this.prisma.conversation.upsert({
       where: { omiSessionId_openaiConversationId: { omiSessionId: sessionRow.id, openaiConversationId: conversationId } },
-      update: {},
-      create: { omiSessionId: sessionRow.id, openaiConversationId: conversationId }
+      update: {
+        // Update userId if session now has one
+        userId: sessionRow.userId || undefined,
+        title: question ? question.substring(0, 100) : undefined
+      },
+      create: { 
+        omiSessionId: sessionRow.id, 
+        openaiConversationId: conversationId,
+        userId: sessionRow.userId || null, // Link to user if session has userId
+        title: question ? question.substring(0, 100) : null
+      }
     });
     
     if (question) {
@@ -255,7 +315,12 @@ class BackgroundQueue {
       });
     }
     
-    this.logger.log(`Conversation saved: ${conversationRow.id}`);
+    this.logger.info('Conversation saved', { 
+      conversationId: conversationRow.id,
+      sessionId: sessionRow.id,
+      hasQuestion: !!question,
+      hasResponse: !!aiResponse 
+    });
     return conversationRow;
   }
 
@@ -275,7 +340,10 @@ class BackgroundQueue {
     });
     
     if (!conversation) {
-      this.logger.warn(`Conversation ${conversationId} not found or not accessible by user ${userId}`);
+      this.logger.warn('Conversation not accessible', { 
+        conversationId,
+        userId 
+      });
       return;
     }
     
@@ -285,7 +353,10 @@ class BackgroundQueue {
         where: { id: conversationId },
         data: { userId: userId }
       });
-      this.logger.log(`Linked conversation ${conversationId} to user ${userId}`);
+      this.logger.debug('Linked conversation to user', { 
+        conversationId,
+        userId 
+      });
     }
     
     let active = await this.prisma.userContextWindow.findFirst({ 
@@ -314,13 +385,22 @@ class BackgroundQueue {
       });
     }
     
-    this.logger.log(`Context window updated for user: ${userId}`);
+    this.logger.debug('Context window updated', { 
+      userId,
+      conversationId,
+      slot: active?.slot || 1 
+    });
   }
 
   // Start processing loop
   start() {
     setInterval(() => this.processJobs(), this.processingInterval);
-    this.logger.log('Background queue started');
+    this.logger.info('Background queue started', {
+      batchSize: this.batchSize,
+      processingInterval: `${this.processingInterval}ms`,
+      maxConcurrentJobs: this.maxConcurrentJobs,
+      maxRetries: this.maxRetries
+    });
   }
 
   // Get queue status
