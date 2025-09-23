@@ -312,13 +312,25 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       // Create conversation if needed (parallel with memory fetch)
       const conversationPromise = conversationId ? 
         Promise.resolve(conversationId) : 
-        openai.conversations.create({ metadata: { omi_session_id: String(session_id) } })
-          .then(conv => {
-            conversationId = conv.id;
-            if (sessionRowCache) sessionRowCache.openaiConversationId = conversationId;
-            return conversationId;
-          })
-          .catch(() => null);
+        (async () => {
+          try {
+            // Check if conversations API is available
+            if (openai.beta && openai.beta.conversations) {
+              const conv = await openai.beta.conversations.create({ 
+                metadata: { omi_session_id: String(session_id) } 
+              });
+              conversationId = conv.id;
+              if (sessionRowCache) sessionRowCache.openaiConversationId = conversationId;
+              return conversationId;
+            } else {
+              console.log('Conversations API not available, using session-based context');
+              return null;
+            }
+          } catch (err) {
+            console.warn('Failed to create conversation:', err.message);
+            return null;
+          }
+        })();
       
       // Wait for parallel operations
       const [memoryContext, finalConversationId] = await Promise.all([
@@ -342,44 +354,84 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       
       const openaiStartTime = Date.now();
       try {
-        // Use Chat Completions API (stable and well-supported)
-        const messages = [
-          { role: 'system', content: sysInstructions || 'You are Omi, a helpful assistant. Keep replies concise.' },
-          { role: 'user', content: question }
-        ];
-        
         const modelToUse = OPENAI_MODEL || 'gpt-4o-mini';
-        console.log(`Calling OpenAI Chat Completions with model: ${modelToUse}`);
         
-        const response = await Promise.race([
-          openai.chat.completions.create({
+        // Check if we have the responses API available
+        if (openai.beta && openai.beta.responses) {
+          console.log(`Calling OpenAI Responses API with model: ${modelToUse}`);
+          
+          // Build the request payload for Responses API
+          const requestPayload = {
             model: modelToUse,
-            messages,
-            max_tokens: 300, // Reduced for faster response
+            input: question,
+            instructions: sysInstructions || 'You are Omi, a helpful assistant. Keep replies concise.',
+            max_tokens: 300,
             temperature: 0.7,
-            presence_penalty: 0.1,
-            frequency_penalty: 0.1
-          }),
-          openaiTimeout
-        ]);
-        
-        const responseTime = Date.now() - openaiStartTime;
-        console.log(`OpenAI responded in ${responseTime}ms`);
-        
-        if (responseTime > 5000) {
-          console.warn(`Slow OpenAI response: ${responseTime}ms for model ${modelToUse}`);
+            store: false // Don't store for privacy
+          };
+          
+          // Add conversation if available
+          if (conversationId) {
+            requestPayload.conversation = conversationId;
+          }
+          
+          const response = await Promise.race([
+            openai.beta.responses.create(requestPayload),
+            openaiTimeout
+          ]);
+          
+          const responseTime = Date.now() - openaiStartTime;
+          console.log(`OpenAI Responses API responded in ${responseTime}ms`);
+          
+          if (responseTime > 5000) {
+            console.warn(`Slow OpenAI response: ${responseTime}ms for model ${modelToUse}`);
+          }
+          
+          // Responses API returns output_text directly
+          aiResponse = response.output_text || '';
+        } else {
+          // Fallback to Chat Completions API
+          console.log(`Using Chat Completions API with model: ${modelToUse}`);
+          
+          const messages = [
+            { role: 'system', content: sysInstructions || 'You are Omi, a helpful assistant. Keep replies concise.' },
+            { role: 'user', content: question }
+          ];
+          
+          const response = await Promise.race([
+            openai.chat.completions.create({
+              model: modelToUse,
+              messages,
+              max_tokens: 300,
+              temperature: 0.7,
+              presence_penalty: 0.1,
+              frequency_penalty: 0.1
+            }),
+            openaiTimeout
+          ]);
+          
+          const responseTime = Date.now() - openaiStartTime;
+          console.log(`OpenAI Chat Completions responded in ${responseTime}ms`);
+          
+          if (responseTime > 5000) {
+            console.warn(`Slow OpenAI response: ${responseTime}ms for model ${modelToUse}`);
+          }
+          
+          aiResponse = response.choices?.[0]?.message?.content || '';
         }
-        
-        aiResponse = response.choices?.[0]?.message?.content || '';
       } catch (e) {
         if (e.message === 'OpenAI timeout') {
           console.warn('OpenAI request timed out after 8s');
           aiResponse = "I'm processing your request. Please try again in a moment.";
         } else {
-          console.error('OpenAI error:', e.message, e.response?.data || '');
+          console.error('OpenAI error:', e.message);
+          console.error('Error details:', e.response?.data || e.response?.statusText || 'No additional details');
+          
           // Try with faster model as fallback
           try {
             const fallbackStartTime = Date.now();
+            console.log('Attempting fallback with gpt-3.5-turbo');
+            
             const resp = await Promise.race([
               openai.chat.completions.create({
                 model: 'gpt-3.5-turbo', // Faster fallback model
@@ -396,6 +448,7 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
             aiResponse = resp.choices?.[0]?.message?.content || '';
           } catch (fallbackError) {
             console.error('Fallback OpenAI error:', fallbackError.message);
+            console.error('Fallback error details:', fallbackError.response?.data || fallbackError.response?.statusText || 'No additional details');
             aiResponse = "I'm having trouble right now. Please try again.";
           }
         }

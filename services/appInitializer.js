@@ -124,8 +124,18 @@ class AppInitializer {
       maxRetries: 3
     });
     
+    // Check what APIs are available
+    const availableAPIs = {
+      chatCompletions: !!(this.openai.chat && this.openai.chat.completions),
+      responses: !!(this.openai.beta && this.openai.beta.responses),
+      conversations: !!(this.openai.beta && this.openai.beta.conversations),
+      // Legacy check for responses at root level
+      responsesRoot: !!(this.openai.responses)
+    };
+    
     logger.info('OpenAI client initialized', {
-      model: config.getValue('openai.model')
+      model: config.getValue('openai.model'),
+      availableAPIs
     });
   }
   
