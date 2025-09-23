@@ -477,8 +477,10 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     });
     
     if (!links.length) {
-      return res.status(404).json({ 
-        error: 'No verified OMI link found. Please link your OMI device first.' 
+      return res.status(400).json({ 
+        ok: false,
+        error: 'No verified OMI link found',
+        message: 'Please link your OMI device first.' 
       });
     }
     
@@ -699,11 +701,13 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     }
     
     const userId = session.userId;
-    // Set up SSE headers
+    // Set up SSE headers with CORS
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Credentials': 'true',
       'X-Accel-Buffering': 'no' // Disable Nginx buffering
     });
     
@@ -892,18 +896,18 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
       ok: true,
       conversation: {
         id: currentConversation.id,
-        title: currentConversation.title,
-        summary: currentConversation.summary,
-        createdAt: currentConversation.createdAt.toISOString(),
+        title: currentConversation.title || null,
+        summary: currentConversation.summary || null,
+        createdAt: currentConversation.createdAt ? currentConversation.createdAt.toISOString() : null,
         openaiConversationId: currentConversation.openaiConversationId || null,
         omiSessionKey: currentConversation.omiSession?.omiSessionId || recentSession?.omiSessionId || null
       },
       messages: messages.reverse().map(msg => ({
         id: msg.id,
         role: msg.role,
-        text: msg.text,
-        source: msg.source,
-        createdAt: msg.createdAt.toISOString()
+        text: msg.text || '',
+        source: msg.source || 'UNKNOWN',
+        createdAt: msg.createdAt ? msg.createdAt.toISOString() : null
       })),
       sessionId: recentSession?.omiSessionId || sessionId || null
     });
@@ -1170,6 +1174,20 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
         date: d.createdAt.toISOString().split('T')[0],
         count: d._count
       }))
+    });
+  }));
+  
+  // GET /agent-events - Get agent events (for Expo app compatibility)
+  app.get('/agent-events', requireAuth, asyncHandler(async (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+    const cursor = req.query.cursor;
+    
+    // For now, return empty events array
+    // This can be expanded to include actual agent events when implemented
+    res.json({
+      ok: true,
+      events: [],
+      cursor: null
     });
   }));
   
