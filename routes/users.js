@@ -64,8 +64,8 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
         throw new AuthenticationError('No session token provided');
       }
       
-      const session = await prisma.userSession.findUnique({
-        where: { sid },
+      const session = await prisma.authSession.findUnique({
+        where: { sessionToken: sid },
         include: { user: true }
       });
       
@@ -74,12 +74,12 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
       }
       
       if (session.expiresAt && session.expiresAt < new Date()) {
-        await prisma.userSession.delete({ where: { sid } });
+        await prisma.authSession.delete({ where: { sessionToken: sid } });
         throw new AuthenticationError('Session expired');
       }
       
       req.user = session.user;
-      req.sessionId = session.sid;
+      req.sessionId = session.sessionToken;
       
       // Log authenticated request
       logger.debug('Authenticated request', {
@@ -96,7 +96,8 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
   
   // POST /auth/register - User registration
   app.post('/auth/register', asyncHandler(async (req, res) => {
-    const { email, password, name } = req.body;
+    const { email, password, name, display_name } = req.body;
+    const displayName = display_name || name; // Support both field names
     
     // Validation
     if (!email || !password) {
@@ -128,16 +129,16 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     const user = await prisma.user.create({
       data: {
         email: email.toLowerCase(),
-        password: hashedPassword,
-        name: name || null
+        passwordHash: hashedPassword,
+        displayName: displayName || null
       }
     });
     
     // Create session
     const sid = crypto.randomBytes(32).toString('hex');
-    const session = await prisma.userSession.create({
+    const session = await prisma.authSession.create({
       data: {
-        sid,
+        sessionToken: sid,
         userId: user.id,
         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
       }
@@ -157,7 +158,7 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
       user: {
         id: user.id,
         email: user.email,
-        displayName: user.name,
+        displayName: user.displayName,
         createdAt: user.createdAt
       }
     });
@@ -181,13 +182,13 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     }
     
     // Verify password
-    const validPassword = await argon2.verify(user.password, password);
+    const validPassword = await argon2.verify(user.passwordHash, password);
     if (!validPassword) {
       throw new AuthenticationError('Invalid credentials');
     }
     
     // Clean up old sessions
-    await prisma.userSession.deleteMany({
+    await prisma.authSession.deleteMany({
       where: {
         userId: user.id,
         expiresAt: { lt: new Date() }
@@ -196,9 +197,9 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     
     // Create new session
     const sid = crypto.randomBytes(32).toString('hex');
-    const session = await prisma.userSession.create({
+    const session = await prisma.authSession.create({
       data: {
-        sid,
+        sessionToken: sid,
         userId: user.id,
         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
       }
@@ -218,7 +219,7 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
       user: {
         id: user.id,
         email: user.email,
-        displayName: user.name,
+        displayName: user.displayName,
         createdAt: user.createdAt
       }
     });
@@ -226,8 +227,8 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
   
   // POST /auth/logout - User logout
   app.post('/auth/logout', requireAuth, asyncHandler(async (req, res) => {
-    await prisma.userSession.delete({
-      where: { sid: req.sessionId }
+    await prisma.authSession.delete({
+      where: { sessionToken: req.sessionId }
     });
     
     res.clearCookie('sid');
@@ -264,7 +265,7 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
       user: {
         id: user.id,
         email: user.email,
-        name: user.name,
+        displayName: user.displayName,
         createdAt: user.createdAt,
         preferences: user.preferences,
         stats: user._count
@@ -293,7 +294,7 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
       user: {
         id: user.id,
         email: user.email,
-        displayName: user.name || user.displayName
+        displayName: user.displayName
       },
       omi_links: links
     });
