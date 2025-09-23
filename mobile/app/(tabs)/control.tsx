@@ -13,6 +13,7 @@ import {
   apiCreateTask,
   apiMe,
   apiListWindows,
+  apiSyncOmiConversations,
   type MessageItem
 } from '@/lib/api';
 // Slash commands use apiSwitchSpace/apiActivateWindow/apiCreateMemory/apiCreateTask/apiCreateFollowup
@@ -53,6 +54,19 @@ export default function ChatScreen() {
         const windows2 = await apiListWindows();
         active = windows2.find((w: any) => w.isActive && w.conversationId);
       }
+      
+      // If still no active conversation and user has OMI link, try syncing
+      if ((!active || !active.conversationId) && hasOmiLink) {
+        try {
+          await apiSyncOmiConversations();
+          // Retry after sync
+          const windows3 = await apiListWindows();
+          active = windows3.find((w: any) => w.isActive && w.conversationId);
+        } catch (syncError) {
+          console.warn('Auto-sync failed:', syncError);
+        }
+      }
+      
       if (active?.conversationId) setSelectedId(active.conversationId);
     } catch {}
   }

@@ -209,6 +209,31 @@ class BackgroundQueue {
   async updateContextWindow({ userId, conversationId }) {
     if (!this.prisma || !ENABLE_USER_SYSTEM || !userId || !conversationId) return;
     
+    // First, ensure the conversation exists and is properly linked to the user
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { 
+        id: conversationId,
+        OR: [
+          { userId: userId },
+          { omiSession: { userId: userId } }
+        ]
+      }
+    });
+    
+    if (!conversation) {
+      this.logger.warn(`Conversation ${conversationId} not found or not accessible by user ${userId}`);
+      return;
+    }
+    
+    // Update the conversation to ensure it has the userId set
+    if (!conversation.userId) {
+      await this.prisma.conversation.update({
+        where: { id: conversationId },
+        data: { userId: userId }
+      });
+      this.logger.log(`Linked conversation ${conversationId} to user ${userId}`);
+    }
+    
     let active = await this.prisma.userContextWindow.findFirst({ 
       where: { userId, isActive: true } 
     });
