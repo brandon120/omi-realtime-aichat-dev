@@ -471,7 +471,7 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     const nextCursor = hasMore ? page[page.length - 1].createdAt.toISOString() : null;
     
     const mapped = page.map((item) => ({
-      id: item.id.toString(),
+      id: item.id, // Already a string UUID
       title: item.title,
       summary: item.summary,
       createdAt: item.createdAt.toISOString(),
@@ -488,7 +488,7 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
   
   // GET /conversations/:id - Get conversation details
   app.get('/conversations/:id', requireAuth, asyncHandler(async (req, res) => {
-    const conversationId = isNaN(parseInt(req.params.id)) ? req.params.id : parseInt(req.params.id);
+    const conversationId = req.params.id; // Always use as string since IDs are UUIDs
     
     const conversation = await prisma.conversation.findFirst({
       where: {
@@ -512,7 +512,7 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     res.json({
       ok: true,
       conversation: {
-        id: conversation.id.toString(),
+        id: conversation.id, // Already a string UUID
         title: conversation.title,
         summary: conversation.summary,
         createdAt: conversation.createdAt.toISOString(),
@@ -524,9 +524,9 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
   
   // GET /conversations/:id/messages - Get conversation messages
   app.get('/conversations/:id/messages', requireAuth, asyncHandler(async (req, res) => {
-    const conversationId = isNaN(parseInt(req.params.id)) ? req.params.id : parseInt(req.params.id);
+    const conversationId = req.params.id; // Always use as string since IDs are UUIDs
     const limit = Math.min(parseInt(req.query.limit) || 50, 200);
-    const cursor = req.query.cursor ? parseInt(req.query.cursor) : null;
+    const cursor = req.query.cursor || null; // Cursor is also a string (message ID)
     
     // Verify conversation belongs to user
     const conversation = await prisma.conversation.findFirst({
@@ -546,16 +546,16 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     const where = { conversationId: conversation.id };
     const messages = await prisma.message.findMany({
       where: cursor ? { AND: [where, { id: { gt: cursor } }] } : where,
-      orderBy: { createdAt: 'asc' },
+      orderBy: { id: 'asc' }, // Order by ID for cursor pagination
       take: limit + 1
     });
     
     const hasMore = messages.length > limit;
     const page = hasMore ? messages.slice(0, limit) : messages;
-    const nextCursor = hasMore ? page[page.length - 1].id.toString() : null;
+    const nextCursor = hasMore ? page[page.length - 1].id : null; // Already a string UUID
     
     const items = page.map(msg => ({
-      id: msg.id.toString(),
+      id: msg.id, // Already a string UUID
       role: msg.role,
       text: msg.text,
       source: msg.source,
@@ -577,7 +577,7 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
       throw new ValidationError('text is required');
     }
     
-    let conversationId = conversation_id;
+    let conversationId = conversation_id; // Already a string UUID
     
     // If slot is provided, get conversation from that window
     if (slot && !conversationId) {
@@ -631,7 +631,7 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     
     res.json({
       ok: true,
-      conversation_id: conversationId.toString(),
+      conversation_id: conversationId, // Already a string
       assistant_text: assistantText
     });
   }));
