@@ -71,8 +71,22 @@ class AppInitializer {
   }
   
   async initializeDatabase() {
-    if (!config.getValue('database.enableUserSystem')) {
+    const enableUserSystem = config.getValue('database.enableUserSystem');
+    const databaseUrl = config.getValue('database.url');
+    
+    logger.info('Database initialization check', {
+      enableUserSystem,
+      hasDatabaseUrl: !!databaseUrl,
+      databaseUrlLength: databaseUrl ? databaseUrl.length : 0
+    });
+    
+    if (!enableUserSystem) {
       logger.info('User system disabled, skipping database initialization');
+      return;
+    }
+    
+    if (!databaseUrl) {
+      logger.warn('DATABASE_URL not configured, skipping database initialization');
       return;
     }
     
@@ -82,7 +96,7 @@ class AppInitializer {
         log: config.getValue('database.enableLogging') ? ['query', 'info', 'warn', 'error'] : ['error'],
         datasources: {
           db: {
-            url: config.getValue('database.url')
+            url: databaseUrl
           }
         }
       });
@@ -97,11 +111,17 @@ class AppInitializer {
         });
       }
       
-      logger.info('Database initialized successfully');
+      logger.info('Database initialized successfully', {
+        prismaClient: !!this.prisma
+      });
     } catch (error) {
       logger.error('Database initialization failed', {
-        error: error.message
+        error: error.message,
+        stack: error.stack
       });
+      
+      // Set prisma to null on failure
+      this.prisma = null;
       
       if (config.isProduction) {
         throw error; // Fatal in production
@@ -322,15 +342,21 @@ class AppInitializer {
     });
     logger.info('Realtime routes initialized');
     
-    // Setup user routes if enabled
-    if (config.getValue('database.enableUserSystem')) {
+    // Setup user routes if database is available
+    logger.info('Setting up user routes', {
+      enableUserSystem: config.getValue('database.enableUserSystem'),
+      hasPrisma: !!this.prisma,
+      prismaType: this.prisma ? typeof this.prisma : 'undefined'
+    });
+    
+    if (this.prisma) {
       const createUserRoutes = require('../routes/users');
       createUserRoutes({
         app,
         prisma: this.prisma,
         config
       });
-      logger.info('User routes initialized');
+      logger.info('User routes initialized with database');
     } else {
       // Create stub endpoints when no database
       app.get('/conversations/current', (req, res) => {
@@ -347,7 +373,7 @@ class AppInitializer {
         });
       });
       
-      logger.info('User route stubs created (no database)');
+      logger.warn('User route stubs created (no database connection available)');
     }
     
     // Setup windows and linking routes (can work with or without database)
