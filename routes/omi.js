@@ -96,9 +96,13 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
     const responseTimeout = setTimeout(() => {
       if (!res.headersSent) {
         console.warn('Webhook timeout - sending early response');
-        res.status(200).json({ message: "Processing your request...", processing: true });
+        res.status(200).json({ 
+          message: "I'm here! Give me a moment to think...", 
+          help_response: "You can talk to me naturally!", 
+          instructions: "Ask questions naturally or use 'Hey Omi' to be explicit." 
+        });
       }
-    }, 25000); // Respond at 25 seconds to avoid 499 errors
+    }, 12000); // Respond at 12 seconds max
     
     try {
       // Combined payload support: can include both transcript segments and memory data
@@ -295,7 +299,10 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
           }).then(mems => {
             const context = mems.map((m) => `- ${m.text}`).join('\n');
             return context.length > 2000 ? context.slice(0, 2000) : context;
-          }).catch(() => '');
+          }).catch((err) => {
+            console.warn('Failed to fetch memories:', err.message);
+            return '';
+          });
         }
       }
       
@@ -330,37 +337,54 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       // Call OpenAI with timeout to prevent long delays
       let aiResponse = '';
       const openaiTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('OpenAI timeout')), 20000)
+        setTimeout(() => reject(new Error('OpenAI timeout')), 10000) // Reduced to 10 seconds
       );
       
+      const openaiStartTime = Date.now();
       try {
-        const requestPayload = { model: OPENAI_MODEL, input: question };
-        if (conversationId) requestPayload.conversation = conversationId;
-        if (sysInstructions) requestPayload.instructions = sysInstructions;
+        // Use the standard chat completions API
+        const messages = [
+          { role: 'system', content: sysInstructions || 'You are Omi, a helpful assistant.' },
+          { role: 'user', content: question }
+        ];
         
+        console.log(`Calling OpenAI with model: ${OPENAI_MODEL || 'gpt-4o-mini'}`);
         const response = await Promise.race([
-          openai.responses.create(requestPayload),
+          openai.chat.completions.create({
+            model: OPENAI_MODEL || 'gpt-4o-mini',
+            messages,
+            max_tokens: 500,
+            temperature: 0.7
+          }),
           openaiTimeout
         ]);
-        aiResponse = response.output_text;
+        
+        console.log(`OpenAI responded in ${Date.now() - openaiStartTime}ms`);
+        aiResponse = response.choices?.[0]?.message?.content || '';
       } catch (e) {
         if (e.message === 'OpenAI timeout') {
-          console.warn('OpenAI request timed out, using fallback');
+          console.warn('OpenAI request timed out after 10s');
           aiResponse = "I'm processing your request. Please try again in a moment.";
         } else {
+          console.error('OpenAI error:', e.message);
+          // Try with a simpler, faster model as fallback
           try {
             const resp = await Promise.race([
               openai.chat.completions.create({
-                model: 'gpt-4o-mini', // Use faster model for fallback
-                messages: [ { role: 'system', content: sysInstructions || 'You are a helpful assistant.' }, { role: 'user', content: question } ],
-                max_tokens: 500,
+                model: 'gpt-3.5-turbo', // Even faster fallback model
+                messages: [ 
+                  { role: 'system', content: 'You are a helpful assistant.' }, 
+                  { role: 'user', content: question } 
+                ],
+                max_tokens: 200,
                 temperature: 0.7
               }),
-              openaiTimeout
+              new Promise((_, reject) => setTimeout(() => reject(new Error('Fallback timeout')), 5000))
             ]);
             aiResponse = resp.choices?.[0]?.message?.content || '';
-          } catch {
-            aiResponse = "I'm sorry, please try again later.";
+          } catch (fallbackError) {
+            console.error('Fallback OpenAI error:', fallbackError.message);
+            aiResponse = "I'm sorry, I'm having trouble processing your request. Please try again later.";
           }
         }
       }
