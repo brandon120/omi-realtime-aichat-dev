@@ -438,69 +438,69 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     res.json({ message: 'Memory deleted successfully' });
   }));
   
-  // GET /conversations - Get user conversations
+  // GET /conversations - Get user conversations (Expo app format with cursor)
   app.get('/conversations', requireAuth, asyncHandler(async (req, res) => {
-    const limit = Math.min(parseInt(req.query.limit) || 20, 50);
-    const offset = parseInt(req.query.offset) || 0;
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const cursor = req.query.cursor ? new Date(String(req.query.cursor)) : null;
     
-    const [conversations, total] = await Promise.all([
-      prisma.conversation.findMany({
-        where: {
-          OR: [
-            { userId: req.user.id },
-            { omiSession: { userId: req.user.id } }
-          ]
-        },
-        include: {
-          messages: {
-            orderBy: { createdAt: 'desc' },
-            take: 1
-          },
-          _count: {
-            select: { messages: true }
-          }
-        },
-        orderBy: { createdAt: 'desc' },
-        take: limit,
-        skip: offset
-      }),
-      prisma.conversation.count({
-        where: {
-          OR: [
-            { userId: req.user.id },
-            { omiSession: { userId: req.user.id } }
-          ]
+    const where = {
+      OR: [
+        { userId: req.user.id },
+        { omiSession: { userId: req.user.id } }
+      ]
+    };
+    
+    const items = await prisma.conversation.findMany({
+      where: cursor ? { AND: [where, { createdAt: { lt: cursor } }] } : where,
+      orderBy: { createdAt: 'desc' },
+      take: limit + 1,
+      select: {
+        id: true,
+        title: true,
+        summary: true,
+        createdAt: true,
+        openaiConversationId: true,
+        omiSession: { 
+          select: { omiSessionId: true } 
         }
-      })
-    ]);
+      }
+    });
+    
+    const hasMore = items.length > limit;
+    const page = hasMore ? items.slice(0, limit) : items;
+    const nextCursor = hasMore ? page[page.length - 1].createdAt.toISOString() : null;
+    
+    const mapped = page.map((item) => ({
+      id: item.id.toString(),
+      title: item.title,
+      summary: item.summary,
+      createdAt: item.createdAt.toISOString(),
+      openaiConversationId: item.openaiConversationId || null,
+      omiSessionKey: item.omiSession ? item.omiSession.omiSessionId : null
+    }));
     
     res.json({
-      conversations: conversations.map(c => ({
-        id: c.id,
-        createdAt: c.createdAt,
-        messageCount: c._count.messages,
-        lastMessage: c.messages[0] || null
-      })),
-      total,
-      limit,
-      offset,
-      hasMore: offset + conversations.length < total
+      ok: true,
+      items: mapped,
+      nextCursor
     });
   }));
   
   // GET /conversations/:id - Get conversation details
   app.get('/conversations/:id', requireAuth, asyncHandler(async (req, res) => {
+    const conversationId = isNaN(parseInt(req.params.id)) ? req.params.id : parseInt(req.params.id);
+    
     const conversation = await prisma.conversation.findFirst({
       where: {
-        id: parseInt(req.params.id),
+        id: conversationId,
         OR: [
           { userId: req.user.id },
           { omiSession: { userId: req.user.id } }
         ]
       },
       include: {
-        messages: {
-          orderBy: { createdAt: 'asc' }
+        omiSession: {
+          select: { omiSessionId: true }
         }
       }
     });
@@ -509,7 +509,131 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
       throw new NotFoundError('Conversation', req.params.id);
     }
     
-    res.json(conversation);
+    res.json({
+      ok: true,
+      conversation: {
+        id: conversation.id.toString(),
+        title: conversation.title,
+        summary: conversation.summary,
+        createdAt: conversation.createdAt.toISOString(),
+        openaiConversationId: conversation.openaiConversationId || null,
+        omiSessionKey: conversation.omiSession ? conversation.omiSession.omiSessionId : null
+      }
+    });
+  }));
+  
+  // GET /conversations/:id/messages - Get conversation messages
+  app.get('/conversations/:id/messages', requireAuth, asyncHandler(async (req, res) => {
+    const conversationId = isNaN(parseInt(req.params.id)) ? req.params.id : parseInt(req.params.id);
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+    const cursor = req.query.cursor ? parseInt(req.query.cursor) : null;
+    
+    // Verify conversation belongs to user
+    const conversation = await prisma.conversation.findFirst({
+      where: {
+        id: conversationId,
+        OR: [
+          { userId: req.user.id },
+          { omiSession: { userId: req.user.id } }
+        ]
+      }
+    });
+    
+    if (!conversation) {
+      throw new NotFoundError('Conversation', req.params.id);
+    }
+    
+    const where = { conversationId: conversation.id };
+    const messages = await prisma.message.findMany({
+      where: cursor ? { AND: [where, { id: { gt: cursor } }] } : where,
+      orderBy: { createdAt: 'asc' },
+      take: limit + 1
+    });
+    
+    const hasMore = messages.length > limit;
+    const page = hasMore ? messages.slice(0, limit) : messages;
+    const nextCursor = hasMore ? page[page.length - 1].id.toString() : null;
+    
+    const items = page.map(msg => ({
+      id: msg.id.toString(),
+      role: msg.role,
+      text: msg.text,
+      source: msg.source,
+      createdAt: msg.createdAt.toISOString()
+    }));
+    
+    res.json({
+      ok: true,
+      items,
+      nextCursor
+    });
+  }));
+  
+  // POST /messages/send - Send a message
+  app.post('/messages/send', requireAuth, asyncHandler(async (req, res) => {
+    const { conversation_id, slot, text } = req.body;
+    
+    if (!text) {
+      throw new ValidationError('text is required');
+    }
+    
+    let conversationId = conversation_id;
+    
+    // If slot is provided, get conversation from that window
+    if (slot && !conversationId) {
+      const window = await prisma.userContextWindow.findUnique({
+        where: {
+          userId_slot: {
+            userId: req.user.id,
+            slot: parseInt(slot)
+          }
+        }
+      });
+      
+      if (window) {
+        conversationId = window.conversationId;
+      }
+    }
+    
+    // Create new conversation if needed
+    if (!conversationId) {
+      const newConv = await prisma.conversation.create({
+        data: {
+          userId: req.user.id,
+          openaiConversationId: ''
+        }
+      });
+      conversationId = newConv.id;
+    }
+    
+    // Save user message
+    await prisma.message.create({
+      data: {
+        conversationId,
+        role: 'USER',
+        text,
+        source: 'FRONTEND'
+      }
+    });
+    
+    // TODO: Call OpenAI for response
+    const assistantText = 'I received your message. The AI response feature is being implemented.';
+    
+    // Save assistant response
+    await prisma.message.create({
+      data: {
+        conversationId,
+        role: 'ASSISTANT',
+        text: assistantText,
+        source: 'SYSTEM'
+      }
+    });
+    
+    res.json({
+      ok: true,
+      conversation_id: conversationId.toString(),
+      assistant_text: assistantText
+    });
   }));
   
   // GET /stats - Get user statistics

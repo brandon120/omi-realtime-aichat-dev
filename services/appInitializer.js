@@ -321,6 +321,15 @@ class AppInitializer {
         config
       });
       logger.info('User routes initialized');
+      
+      // Setup windows and linking routes
+      const createWindowsRoutes = require('../routes/windows');
+      createWindowsRoutes({
+        app,
+        prisma: this.prisma,
+        config
+      });
+      logger.info('Windows and linking routes initialized');
     }
     
     // 404 handler
