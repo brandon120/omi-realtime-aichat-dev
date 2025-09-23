@@ -229,32 +229,36 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
           }
         }
         
-        // Create or update OMI session with user linkage
-        if (linkedUserId) {
-          try {
-            const sessionData = await prisma.omiSession.upsert({
-              where: { omiSessionId: String(session_id) },
-              update: { 
-                userId: linkedUserId,
-                lastSeenAt: new Date()
-              },
-              create: {
-                omiSessionId: String(session_id),
-                userId: linkedUserId,
-                lastSeenAt: new Date()
-              },
-              include: { user: true, preferences: true }
-            });
-            sessionRowCache = sessionData;
-            // Update cache
-            const cacheKey = `${session_id}-${linkedUserId}`;
-            sessionCache.set(cacheKey, { 
-              data: { sessionRow: sessionData, linkedUserId }, 
-              timestamp: Date.now() 
-            });
-          } catch (err) {
-            console.warn('Failed to upsert OMI session:', err.message);
+        // Always create or update OMI session (with or without user linkage)
+        try {
+          const sessionData = await prisma.omiSession.upsert({
+            where: { omiSessionId: String(session_id) },
+            update: { 
+              userId: linkedUserId || undefined, // Only update if we have a userId
+              lastSeenAt: new Date()
+            },
+            create: {
+              omiSessionId: String(session_id),
+              userId: linkedUserId || null,
+              lastSeenAt: new Date()
+            },
+            include: { user: true, preferences: true }
+          });
+          sessionRowCache = sessionData;
+          
+          // If session has a userId but we didn't have linkedUserId, use it
+          if (!linkedUserId && sessionData.userId) {
+            linkedUserId = sessionData.userId;
           }
+          
+          // Update cache
+          const cacheKey = `${session_id}-${linkedUserId || 'null'}`;
+          sessionCache.set(cacheKey, { 
+            data: { sessionRow: sessionData, linkedUserId }, 
+            timestamp: Date.now() 
+          });
+        } catch (err) {
+          console.warn('Failed to upsert OMI session:', err.message);
         }
       }
 

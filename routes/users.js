@@ -633,6 +633,53 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     res.json({ message: 'Memory deleted successfully' });
   }));
   
+  // POST /sessions/link - Link an OMI session to the current user
+  app.post('/sessions/link', requireAuth, asyncHandler(async (req, res) => {
+    const { session_id } = req.body;
+    
+    if (!session_id) {
+      return res.status(400).json({
+        error: 'Validation failed',
+        message: 'session_id is required'
+      });
+    }
+    
+    // Create or update the session to link it to this user
+    const session = await prisma.omiSession.upsert({
+      where: { omiSessionId: String(session_id) },
+      update: {
+        userId: req.user.id,
+        lastSeenAt: new Date()
+      },
+      create: {
+        omiSessionId: String(session_id),
+        userId: req.user.id,
+        lastSeenAt: new Date()
+      }
+    });
+    
+    logger.info('Session linked to user', {
+      sessionId: session_id,
+      userId: req.user.id
+    });
+    
+    // Find any existing conversations for this session
+    const conversations = await prisma.conversation.findMany({
+      where: { omiSessionId: session.id },
+      orderBy: { createdAt: 'desc' },
+      take: 1
+    });
+    
+    res.json({
+      ok: true,
+      session: {
+        id: session.omiSessionId,
+        linked: true,
+        hasConversations: conversations.length > 0
+      }
+    });
+  }));
+  
   // GET /conversations/current/stream - Server-Sent Events for live chat updates
   app.get('/conversations/current/stream', asyncHandler(async (req, res) => {
     // Handle auth from query param for EventSource compatibility

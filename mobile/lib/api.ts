@@ -212,6 +212,15 @@ export async function apiSyncOmiConversations(): Promise<{ ok: boolean; message?
   return null;
 }
 
+export async function apiLinkSession(session_id: string): Promise<boolean> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.post('/sessions/link', { session_id });
+    return !!(data && data.ok);
+  } catch {}
+  return false;
+}
+
 // Conversations & Messages
 export type ConversationItem = {
   id: string;

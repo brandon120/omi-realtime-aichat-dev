@@ -280,8 +280,17 @@ class BackgroundQueue {
     
     const conversationRow = await this.prisma.conversation.upsert({
       where: { omiSessionId_openaiConversationId: { omiSessionId: sessionRow.id, openaiConversationId: conversationId } },
-      update: {},
-      create: { omiSessionId: sessionRow.id, openaiConversationId: conversationId }
+      update: {
+        // Update userId if session now has one
+        userId: sessionRow.userId || undefined,
+        title: question ? question.substring(0, 100) : undefined
+      },
+      create: { 
+        omiSessionId: sessionRow.id, 
+        openaiConversationId: conversationId,
+        userId: sessionRow.userId || null, // Link to user if session has userId
+        title: question ? question.substring(0, 100) : null
+      }
     });
     
     if (question) {
