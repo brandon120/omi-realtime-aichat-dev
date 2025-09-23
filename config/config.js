@@ -55,9 +55,11 @@ class Config {
       conversationState: {
         enabled: this.getBoolean('OPENAI_CONVERSATION_STATE', true),
         storeResponses: this.getBoolean('OPENAI_STORE_RESPONSES', true),
-        maxContextTokens: this.getNumber('OPENAI_MAX_CONTEXT_TOKENS', 500),
-        webhookMaxTokens: this.getNumber('OPENAI_WEBHOOK_MAX_TOKENS', 300),
-        webhookTimeout: this.getNumber('OPENAI_WEBHOOK_TIMEOUT', 8000)
+        maxContextTokens: this.getNumber('OPENAI_MAX_CONTEXT_TOKENS', 1000), // Increased for better context
+        webhookMaxTokens: this.getNumber('OPENAI_WEBHOOK_MAX_TOKENS', 500), // Increased for better responses
+        webhookTimeout: this.getNumber('OPENAI_WEBHOOK_TIMEOUT', 8000),
+        includeHistory: this.getBoolean('OPENAI_INCLUDE_HISTORY', true), // Include conversation history
+        historyMessages: this.getNumber('OPENAI_HISTORY_MESSAGES', 10) // Number of messages to include
       }
     },
       

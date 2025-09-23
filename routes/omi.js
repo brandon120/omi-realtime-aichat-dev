@@ -343,6 +343,14 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       let conversationId = sessionRowCache?.openaiConversationId || null;
       let previousResponseId = sessionRowCache?.lastResponseId || null;
       
+      console.log('Session state:', {
+        sessionId: session_id,
+        hasSessionRow: !!sessionRowCache,
+        conversationId,
+        previousResponseId,
+        userId: sessionRowCache?.userId || linkedUserId
+      });
+      
       // Create or retrieve conversation (parallel with memory fetch)
       const conversationPromise = (async () => {
         try {
@@ -393,12 +401,59 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
         previousResponseId = conversationState.previousResponseId;
       }
       
+      // Get recent conversation history for context
+      let conversationHistory = '';
+      const includeHistory = config.getValue('openai.conversationState.includeHistory', true);
+      const historyMessages = config.getValue('openai.conversationState.historyMessages', 10);
+      
+      if (includeHistory && ENABLE_USER_SYSTEM && prisma && sessionRowCache?.id) {
+        try {
+          // Find conversations for this session
+          const recentConversation = await prisma.conversation.findFirst({
+            where: {
+              OR: [
+                { omiSessionId: sessionRowCache.id },
+                { openaiConversationId: conversationId }
+              ].filter(Boolean)
+            },
+            orderBy: { createdAt: 'desc' },
+            include: {
+              messages: {
+                orderBy: { createdAt: 'desc' },
+                take: historyMessages
+              }
+            }
+          });
+          
+          if (recentConversation?.messages?.length > 0) {
+            // Format recent messages for context
+            const recentMessages = recentConversation.messages
+              .reverse() // Put in chronological order
+              .map(msg => `${msg.role}: ${msg.text.substring(0, 200)}`)
+              .join('\n');
+            conversationHistory = `Recent conversation:\n${recentMessages}`;
+            console.log(`Loaded ${recentConversation.messages.length} messages for context`);
+          }
+        } catch (err) {
+          console.warn('Failed to load conversation history:', err.message);
+        }
+      }
+      
       // Build system instructions with optimized context
       // Keep instructions concise to save tokens while maintaining context
       const maxContextTokens = config.getValue('openai.conversationState.maxContextTokens', 500);
       const baseInstructions = 'You are Omi, a friendly, practical assistant. Keep replies concise.';
-      const contextInstructions = memoryContext ? 
-        `Context: ${memoryContext.slice(0, maxContextTokens)}` : ''; // Limit memory context to save tokens
+      
+      // Combine all context sources
+      const contextParts = [];
+      if (conversationHistory) {
+        contextParts.push(conversationHistory.slice(0, maxContextTokens * 2)); // Allow more tokens for conversation
+      }
+      if (memoryContext) {
+        contextParts.push(`Memories: ${memoryContext.slice(0, maxContextTokens)}`);
+      }
+      
+      const contextInstructions = contextParts.join('\n\n');
       
       const sysInstructions = [baseInstructions, contextInstructions]
         .filter(Boolean)
@@ -475,6 +530,8 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
           // Fallback to Chat Completions API
           console.log(`Using Chat Completions API with model: ${modelToUse}`);
           
+          const webhookMaxTokens = config.getValue('openai.conversationState.webhookMaxTokens', 500);
+          
           const messages = [
             { role: 'system', content: sysInstructions || 'You are Omi, a helpful assistant. Keep replies concise.' },
             { role: 'user', content: question }
@@ -484,7 +541,7 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
             openai.chat.completions.create({
               model: modelToUse,
               messages,
-              max_tokens: 300,
+              max_tokens: webhookMaxTokens,
               temperature: 0.7,
               presence_penalty: 0.1,
               frequency_penalty: 0.1
