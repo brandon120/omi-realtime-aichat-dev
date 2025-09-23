@@ -298,11 +298,7 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
           }).catch(() => '');
         }
       }
-      const sysInstructions = [
-        'You are Omi, a friendly, practical assistant. Keep replies concise.',
-        memoryContext ? `Relevant memories:\n${memoryContext}` : ''
-      ].filter(Boolean).join('\n\n');
-
+      
       // Ensure conversation id is stored in OmiSession
       let conversationId = sessionRowCache?.openaiConversationId || null;
       
@@ -324,6 +320,12 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       ]);
       
       if (finalConversationId) conversationId = finalConversationId;
+      
+      // Build system instructions AFTER memoryContext is resolved
+      const sysInstructions = [
+        'You are Omi, a friendly, practical assistant. Keep replies concise.',
+        memoryContext ? `Relevant memories:\n${memoryContext}` : ''
+      ].filter(Boolean).join('\n\n');
 
       // Call OpenAI with timeout to prevent long delays
       let aiResponse = '';
