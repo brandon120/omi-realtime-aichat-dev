@@ -14,7 +14,57 @@ const { logger } = require('../services/logger');
  */
 module.exports = function createWindowsRoutes({ app, prisma, config }) {
   if (!app) throw new Error('app is required');
-  if (!prisma) throw new Error('prisma is required for windows routes');
+  
+  // If no database, create stub endpoints that return appropriate messages
+  if (!prisma) {
+    console.warn('Windows routes: No database configured, creating stub endpoints');
+    
+    // Stub endpoints for OMI linking
+    app.post('/link/omi/start', (req, res) => {
+      res.status(503).json({
+        error: 'Database required for OMI linking',
+        message: 'Please configure DATABASE_URL to enable device linking'
+      });
+    });
+    
+    app.post('/link/omi/confirm', (req, res) => {
+      res.status(503).json({
+        error: 'Database required for OMI linking',
+        message: 'Please configure DATABASE_URL to enable device linking'
+      });
+    });
+    
+    app.post('/link/omi/sync-conversations', (req, res) => {
+      res.status(503).json({
+        error: 'Database required for conversation sync',
+        message: 'Please configure DATABASE_URL to enable this feature'
+      });
+    });
+    
+    // Stub endpoints for windows
+    app.get('/windows', (req, res) => {
+      res.json({
+        windows: [],
+        message: 'Database required for context windows'
+      });
+    });
+    
+    app.post('/windows/activate', (req, res) => {
+      res.status(503).json({
+        error: 'Database required for context windows',
+        message: 'Please configure DATABASE_URL to enable this feature'
+      });
+    });
+    
+    app.post('/windows/switch', (req, res) => {
+      res.status(503).json({
+        error: 'Database required for context windows',
+        message: 'Please configure DATABASE_URL to enable this feature'
+      });
+    });
+    
+    return;
+  }
   
   // Helper: Get session ID from request
   function getSidFromRequest(req) {
@@ -219,25 +269,25 @@ module.exports = function createWindowsRoutes({ app, prisma, config }) {
     }
     
     // Generate OTP
-    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const verificationExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
     
     // Upsert link record
     await prisma.omiUserLink.upsert({
       where: { omiUserId },
       update: {
         userId: req.user.id,
-        otpCode,
-        otpExpiry,
-        otpAttempts: 0,
+        verificationCode,
+        verificationExpiresAt,
+        verificationAttempts: 0,
         isVerified: false
       },
       create: {
         omiUserId,
         userId: req.user.id,
-        otpCode,
-        otpExpiry,
-        otpAttempts: 0,
+        verificationCode,
+        verificationExpiresAt,
+        verificationAttempts: 0,
         isVerified: false
       }
     });
@@ -250,7 +300,7 @@ module.exports = function createWindowsRoutes({ app, prisma, config }) {
     // In development, return the code for testing
     const response = { ok: true };
     if (config.getValue('env') === 'development') {
-      response.dev_code = otpCode;
+      response.dev_code = verificationCode;
     }
     
     res.json(response);
@@ -284,23 +334,23 @@ module.exports = function createWindowsRoutes({ app, prisma, config }) {
     }
     
     // Check OTP expiry
-    if (link.otpExpiry && link.otpExpiry < new Date()) {
+    if (link.verificationExpiresAt && link.verificationExpiresAt < new Date()) {
       return res.status(400).json({ error: 'OTP has expired' });
     }
     
     // Check attempts
-    if (link.otpAttempts >= 5) {
+    if (link.verificationAttempts >= 5) {
       return res.status(429).json({ error: 'Too many attempts' });
     }
     
     // Increment attempts
     await prisma.omiUserLink.update({
       where: { omiUserId },
-      data: { otpAttempts: link.otpAttempts + 1 }
+      data: { verificationAttempts: link.verificationAttempts + 1 }
     });
     
     // Verify code
-    if (link.otpCode !== inputCode) {
+    if (link.verificationCode !== inputCode) {
       return res.status(400).json({ error: 'Invalid code' });
     }
     
@@ -310,8 +360,8 @@ module.exports = function createWindowsRoutes({ app, prisma, config }) {
       data: {
         isVerified: true,
         verifiedAt: new Date(),
-        otpCode: null,
-        otpExpiry: null
+        verificationCode: null,
+        verificationExpiresAt: null
       }
     });
     
