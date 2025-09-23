@@ -47,7 +47,7 @@ class Config {
       // OpenAI Configuration
       openai: {
         apiKey: this.getString('OPENAI_API_KEY') || this.getString('OPENAI_KEY', ''),
-        model: this.getString('OPENAI_MODEL', 'gpt-4o-mini'),
+        model: this.getString('OPENAI_MODEL', 'gpt-4o-mini'), // Note: gpt-5 models mentioned in docs are not yet available
         maxTokens: this.getNumber('OPENAI_MAX_TOKENS', 500),
         temperature: this.getNumber('OPENAI_TEMPERATURE', 0.7),
         timeout: this.getNumber('OPENAI_TIMEOUT', 20000)

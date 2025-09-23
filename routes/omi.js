@@ -337,54 +337,66 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       // Call OpenAI with timeout to prevent long delays
       let aiResponse = '';
       const openaiTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('OpenAI timeout')), 10000) // Reduced to 10 seconds
+        setTimeout(() => reject(new Error('OpenAI timeout')), 8000) // 8 seconds timeout
       );
       
       const openaiStartTime = Date.now();
       try {
-        // Use the standard chat completions API
+        // Use Chat Completions API (stable and well-supported)
         const messages = [
-          { role: 'system', content: sysInstructions || 'You are Omi, a helpful assistant.' },
+          { role: 'system', content: sysInstructions || 'You are Omi, a helpful assistant. Keep replies concise.' },
           { role: 'user', content: question }
         ];
         
-        console.log(`Calling OpenAI with model: ${OPENAI_MODEL || 'gpt-4o-mini'}`);
+        const modelToUse = OPENAI_MODEL || 'gpt-4o-mini';
+        console.log(`Calling OpenAI Chat Completions with model: ${modelToUse}`);
+        
         const response = await Promise.race([
           openai.chat.completions.create({
-            model: OPENAI_MODEL || 'gpt-4o-mini',
+            model: modelToUse,
             messages,
-            max_tokens: 500,
-            temperature: 0.7
+            max_tokens: 300, // Reduced for faster response
+            temperature: 0.7,
+            presence_penalty: 0.1,
+            frequency_penalty: 0.1
           }),
           openaiTimeout
         ]);
         
-        console.log(`OpenAI responded in ${Date.now() - openaiStartTime}ms`);
+        const responseTime = Date.now() - openaiStartTime;
+        console.log(`OpenAI responded in ${responseTime}ms`);
+        
+        if (responseTime > 5000) {
+          console.warn(`Slow OpenAI response: ${responseTime}ms for model ${modelToUse}`);
+        }
+        
         aiResponse = response.choices?.[0]?.message?.content || '';
       } catch (e) {
         if (e.message === 'OpenAI timeout') {
-          console.warn('OpenAI request timed out after 10s');
+          console.warn('OpenAI request timed out after 8s');
           aiResponse = "I'm processing your request. Please try again in a moment.";
         } else {
-          console.error('OpenAI error:', e.message);
-          // Try with a simpler, faster model as fallback
+          console.error('OpenAI error:', e.message, e.response?.data || '');
+          // Try with faster model as fallback
           try {
+            const fallbackStartTime = Date.now();
             const resp = await Promise.race([
               openai.chat.completions.create({
-                model: 'gpt-3.5-turbo', // Even faster fallback model
+                model: 'gpt-3.5-turbo', // Faster fallback model
                 messages: [ 
-                  { role: 'system', content: 'You are a helpful assistant.' }, 
+                  { role: 'system', content: 'You are a helpful assistant. Be very concise.' }, 
                   { role: 'user', content: question } 
                 ],
-                max_tokens: 200,
+                max_tokens: 150, // Even less tokens for speed
                 temperature: 0.7
               }),
-              new Promise((_, reject) => setTimeout(() => reject(new Error('Fallback timeout')), 5000))
+              new Promise((_, reject) => setTimeout(() => reject(new Error('Fallback timeout')), 3000))
             ]);
+            console.log(`Fallback model responded in ${Date.now() - fallbackStartTime}ms`);
             aiResponse = resp.choices?.[0]?.message?.content || '';
           } catch (fallbackError) {
             console.error('Fallback OpenAI error:', fallbackError.message);
-            aiResponse = "I'm sorry, I'm having trouble processing your request. Please try again later.";
+            aiResponse = "I'm having trouble right now. Please try again.";
           }
         }
       }
