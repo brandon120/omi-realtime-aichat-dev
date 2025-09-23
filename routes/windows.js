@@ -87,7 +87,10 @@ module.exports = function createWindowsRoutes({ app, prisma, config }) {
     try {
       const sid = getSidFromRequest(req);
       if (!sid) {
-        return res.status(401).json({ error: 'Authentication required' });
+        return res.status(401).json({ 
+          error: 'Authentication required',
+          message: 'Please provide a session token via Cookie (sid) or Authorization header'
+        });
       }
       
       const session = await prisma.authSession.findUnique({
@@ -96,19 +99,29 @@ module.exports = function createWindowsRoutes({ app, prisma, config }) {
       });
       
       if (!session) {
-        return res.status(401).json({ error: 'Invalid session' });
+        return res.status(401).json({ 
+          error: 'Invalid session',
+          message: 'Session token is invalid or does not exist'
+        });
       }
       
       if (session.expiresAt && session.expiresAt < new Date()) {
         await prisma.authSession.delete({ where: { sessionToken: sid } });
-        return res.status(401).json({ error: 'Session expired' });
+        return res.status(401).json({ 
+          error: 'Session expired',
+          message: 'Please log in again to get a new session'
+        });
       }
       
       req.user = session.user;
       req.sessionId = session.sessionToken;
       next();
     } catch (error) {
-      next(error);
+      console.error('Auth middleware error:', error.message);
+      return res.status(500).json({ 
+        error: 'Authentication check failed',
+        message: error.message
+      });
     }
   }
   
@@ -253,7 +266,11 @@ module.exports = function createWindowsRoutes({ app, prisma, config }) {
     const omiUserId = String(omi_user_id || '').trim();
     
     if (!omiUserId) {
-      throw new ValidationError('omi_user_id is required');
+      return res.status(400).json({
+        error: 'Validation failed',
+        message: 'omi_user_id is required in request body',
+        received: req.body
+      });
     }
     
     // Check if already linked
