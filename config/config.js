@@ -38,7 +38,8 @@ class Config {
       // Database Configuration
       database: {
         url: this.getString('DATABASE_URL', ''),
-        enableUserSystem: this.getBoolean('ENABLE_USER_SYSTEM', false),
+        // Auto-enable user system if DATABASE_URL is provided, or use explicit setting
+        enableUserSystem: this.getBoolean('ENABLE_USER_SYSTEM', !!this.getString('DATABASE_URL', '')),
         maxConnections: this.getNumber('DB_MAX_CONNECTIONS', 10),
         connectionTimeout: this.getNumber('DB_CONNECTION_TIMEOUT', 30000),
         enableLogging: this.getBoolean('DB_ENABLE_LOGGING', this.isDevelopment)
