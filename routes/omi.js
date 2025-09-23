@@ -91,6 +91,15 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
 
   app.post('/omi-webhook', async (req, res) => {
     const startTime = Date.now();
+    
+    // Set a timeout to ensure we respond before client timeout (499)
+    const responseTimeout = setTimeout(() => {
+      if (!res.headersSent) {
+        console.warn('Webhook timeout - sending early response');
+        res.status(200).json({ message: "Processing your request...", processing: true });
+      }
+    }, 25000); // Respond at 25 seconds to avoid 499 errors
+    
     try {
       // Combined payload support: can include both transcript segments and memory data
       const uid = req.query && req.query.uid ? String(req.query.uid) : null;
@@ -197,18 +206,22 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       let sessionRowCache = null;
       if (ENABLE_USER_SYSTEM && prisma) {
         const payloadUserId = (req.query?.uid ? String(req.query.uid) : (req.body?.uid ? String(req.body.uid) : (req.body?.user_id ? String(req.body.user_id) : null)));
-        if (payloadUserId) {
-          try {
-            const link = await prisma.omiUserLink.findUnique({ where: { omiUserId: payloadUserId } });
-            if (link && link.isVerified) linkedUserId = link.userId;
-          } catch {}
+        
+        // Parallel fetch for user link and session metadata
+        const [linkResult, cachedMetadata] = await Promise.allSettled([
+          payloadUserId ? prisma.omiUserLink.findUnique({ where: { omiUserId: payloadUserId } }) : Promise.resolve(null),
+          getCachedSessionMetadata(session_id, null)
+        ]);
+        
+        if (linkResult.status === 'fulfilled' && linkResult.value?.isVerified) {
+          linkedUserId = linkResult.value.userId;
         }
         
-        // Use cached session metadata
-        const cachedMetadata = await getCachedSessionMetadata(session_id, linkedUserId);
-        sessionRowCache = cachedMetadata.sessionRow;
-        if (!linkedUserId && sessionRowCache?.userId) {
-          linkedUserId = sessionRowCache.userId;
+        if (cachedMetadata.status === 'fulfilled') {
+          sessionRowCache = cachedMetadata.value.sessionRow;
+          if (!linkedUserId && sessionRowCache?.userId) {
+            linkedUserId = sessionRowCache.userId;
+          }
         }
       }
 
@@ -269,19 +282,21 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       }
       lastProcessedQuestion.set(session_id, { normalized, ts: Date.now() });
 
-      // Build context for OpenAI
-      let memoryContext = '';
+      // Build context for OpenAI - fetch memories in parallel with conversation setup
+      let memoryContextPromise = Promise.resolve('');
       if (pref.injectMemories && ENABLE_USER_SYSTEM && prisma) {
-        try {
-          const sessionRow = sessionRowCache || await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
-          if (sessionRow && !sessionRowCache) sessionRowCache = sessionRow;
-          const userIdForMemories = (sessionRow && sessionRow.userId) || linkedUserId || null;
-          if (userIdForMemories) {
-            const mems = await prisma.memory.findMany({ where: { userId: userIdForMemories }, orderBy: { createdAt: 'desc' }, take: 20 });
-            memoryContext = mems.map((m) => `- ${m.text}`).join('\n');
-            if (memoryContext.length > 2000) memoryContext = memoryContext.slice(0, 2000);
-          }
-        } catch {}
+        const userIdForMemories = (sessionRowCache?.userId) || linkedUserId || null;
+        if (userIdForMemories) {
+          memoryContextPromise = prisma.memory.findMany({ 
+            where: { userId: userIdForMemories }, 
+            orderBy: { createdAt: 'desc' }, 
+            take: 20,
+            select: { text: true } // Only fetch needed field
+          }).then(mems => {
+            const context = mems.map((m) => `- ${m.text}`).join('\n');
+            return context.length > 2000 ? context.slice(0, 2000) : context;
+          }).catch(() => '');
+        }
       }
       const sysInstructions = [
         'You are Omi, a friendly, practical assistant. Keep replies concise.',
@@ -289,110 +304,148 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
       ].filter(Boolean).join('\n\n');
 
       // Ensure conversation id is stored in OmiSession
-      let conversationId = null;
-      if (ENABLE_USER_SYSTEM && prisma) {
-        try {
-          const sessionRow = sessionRowCache || await prisma.omiSession.findUnique({ where: { omiSessionId: String(session_id) } });
-          if (sessionRow && !sessionRowCache) sessionRowCache = sessionRow;
-          if (sessionRow && sessionRow.openaiConversationId) {
-            conversationId = sessionRow.openaiConversationId;
-          }
-        } catch {}
-      }
-      if (!conversationId) {
-        try {
-          const conversation = await openai.conversations.create({ metadata: { omi_session_id: String(session_id) } });
-          conversationId = conversation.id;
-          if (sessionRowCache) sessionRowCache.openaiConversationId = conversationId;
-        } catch {}
-      }
+      let conversationId = sessionRowCache?.openaiConversationId || null;
+      
+      // Create conversation if needed (parallel with memory fetch)
+      const conversationPromise = conversationId ? 
+        Promise.resolve(conversationId) : 
+        openai.conversations.create({ metadata: { omi_session_id: String(session_id) } })
+          .then(conv => {
+            conversationId = conv.id;
+            if (sessionRowCache) sessionRowCache.openaiConversationId = conversationId;
+            return conversationId;
+          })
+          .catch(() => null);
+      
+      // Wait for parallel operations
+      const [memoryContext, finalConversationId] = await Promise.all([
+        memoryContextPromise,
+        conversationPromise
+      ]);
+      
+      if (finalConversationId) conversationId = finalConversationId;
 
-      // Call OpenAI
+      // Call OpenAI with timeout to prevent long delays
       let aiResponse = '';
+      const openaiTimeout = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('OpenAI timeout')), 20000)
+      );
+      
       try {
         const requestPayload = { model: OPENAI_MODEL, input: question };
         if (conversationId) requestPayload.conversation = conversationId;
         if (sysInstructions) requestPayload.instructions = sysInstructions;
-        const response = await openai.responses.create(requestPayload);
+        
+        const response = await Promise.race([
+          openai.responses.create(requestPayload),
+          openaiTimeout
+        ]);
         aiResponse = response.output_text;
       } catch (e) {
-        try {
-          const resp = await openai.chat.completions.create({
-            model: 'gpt-4o',
-            messages: [ { role: 'system', content: sysInstructions || 'You are a helpful assistant.' }, { role: 'user', content: question } ],
-            max_tokens: 800,
-            temperature: 0.7
-          });
-          aiResponse = resp.choices?.[0]?.message?.content || '';
-        } catch {
-          aiResponse = "I'm sorry, please try again later.";
+        if (e.message === 'OpenAI timeout') {
+          console.warn('OpenAI request timed out, using fallback');
+          aiResponse = "I'm processing your request. Please try again in a moment.";
+        } else {
+          try {
+            const resp = await Promise.race([
+              openai.chat.completions.create({
+                model: 'gpt-4o-mini', // Use faster model for fallback
+                messages: [ { role: 'system', content: sysInstructions || 'You are a helpful assistant.' }, { role: 'user', content: question } ],
+                max_tokens: 500,
+                temperature: 0.7
+              }),
+              openaiTimeout
+            ]);
+            aiResponse = resp.choices?.[0]?.message?.content || '';
+          } catch {
+            aiResponse = "I'm sorry, please try again later.";
+          }
         }
       }
 
       const instructionsText = 'Ask questions naturally or use "Hey Omi" to be explicit.';
       const helpMessage = 'You can talk to me naturally! Try asking questions or giving commands.';
       const response = { message: aiResponse, help_response: helpMessage, instructions: instructionsText };
-      const jsonRes = res.status(200).json(response);
+      
+      // Clear timeout and send response
+      clearTimeout(responseTimeout);
+      if (!res.headersSent) {
+        res.status(200).json(response);
+      }
       console.log('Webhook response time:', Date.now() - startTime, 'ms');
 
       // Queue background jobs for persistence (non-blocking)
-      if (ENABLE_USER_SYSTEM && prisma && backgroundQueue) {
-        const backgroundSessionId = String(session_id);
-        const backgroundSegments = Array.isArray(segments) ? segments.slice() : [];
-        const backgroundLinkedUserId = linkedUserId;
-        const backgroundConversationId = conversationId ? String(conversationId) : null;
-        const backgroundQuestion = question;
-        const backgroundAiResponse = aiResponse;
-        
-        // Queue session update
-        backgroundQueue.enqueue({
-          type: 'SESSION_UPDATE',
-          data: {
-            sessionId: backgroundSessionId,
-            userId: backgroundLinkedUserId,
-            conversationId: backgroundConversationId,
-            lastSeenAt: new Date()
-          }
-        });
-        
-        // Queue transcript batch upserts
-        if (backgroundSegments.length) {
-          backgroundQueue.enqueue({
-            type: 'TRANSCRIPT_BATCH',
+      // Do this AFTER sending response to minimize latency
+      setImmediate(() => {
+        if (ENABLE_USER_SYSTEM && prisma && backgroundQueue) {
+          const backgroundSessionId = String(session_id);
+          const backgroundSegments = Array.isArray(segments) ? segments.slice() : [];
+          const backgroundLinkedUserId = linkedUserId;
+          const backgroundConversationId = conversationId ? String(conversationId) : null;
+          const backgroundQuestion = question;
+          const backgroundAiResponse = aiResponse;
+          
+          // Combine related jobs to reduce queue overhead
+          const jobs = [];
+          
+          // Session update job
+          jobs.push({
+            type: 'SESSION_UPDATE',
             data: {
               sessionId: backgroundSessionId,
-              segments: backgroundSegments
-            }
-          });
-        }
-        
-        // Queue conversation save
-        if (backgroundConversationId && (backgroundQuestion || backgroundAiResponse)) {
-          backgroundQueue.enqueue({
-            type: 'CONVERSATION_SAVE',
-            data: {
-              sessionId: backgroundSessionId,
+              userId: backgroundLinkedUserId,
               conversationId: backgroundConversationId,
-              question: backgroundQuestion,
-              aiResponse: backgroundAiResponse
+              lastSeenAt: new Date()
             }
           });
           
-          // Queue context window update if user is linked
-          if (backgroundLinkedUserId) {
-            backgroundQueue.enqueue({
-              type: 'CONTEXT_WINDOW_UPDATE',
+          // Transcript batch upserts
+          if (backgroundSegments.length) {
+            jobs.push({
+              type: 'TRANSCRIPT_BATCH',
               data: {
-                userId: backgroundLinkedUserId,
-                conversationId: backgroundConversationId
+                sessionId: backgroundSessionId,
+                segments: backgroundSegments
               }
             });
           }
+          
+          // Conversation save
+          if (backgroundConversationId && (backgroundQuestion || backgroundAiResponse)) {
+            jobs.push({
+              type: 'CONVERSATION_SAVE',
+              data: {
+                sessionId: backgroundSessionId,
+                conversationId: backgroundConversationId,
+                question: backgroundQuestion,
+                aiResponse: backgroundAiResponse
+              }
+            });
+            
+            // Context window update if user is linked
+            if (backgroundLinkedUserId) {
+              jobs.push({
+                type: 'CONTEXT_WINDOW_UPDATE',
+                data: {
+                  userId: backgroundLinkedUserId,
+                  conversationId: backgroundConversationId
+                }
+              });
+            }
+          }
+          
+          // Enqueue all jobs at once
+          jobs.forEach(job => backgroundQueue.enqueue(job));
         }
-      }
-      return jsonRes;
+      });
+      
+      return;
     } catch (e) {
-      return res.status(500).json({ error: 'Webhook processing failed' });
+      clearTimeout(responseTimeout);
+      console.error('Webhook error:', e);
+      if (!res.headersSent) {
+        return res.status(500).json({ error: 'Webhook processing failed' });
+      }
     }
   });
 
@@ -403,9 +456,21 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
     }
     
     const status = backgroundQueue.getStatus();
+    const sessionCacheSize = sessionCache.size;
+    const lastProcessedSize = lastProcessedQuestion.size;
+    
     res.status(200).json({
       ok: true,
-      queue: status
+      queue: status,
+      caches: {
+        sessionCache: sessionCacheSize,
+        lastProcessedQuestion: lastProcessedSize
+      },
+      featureFlags: {
+        ENABLE_USER_SYSTEM,
+        ENABLE_CONTEXT_ACTIVATION,
+        ENABLE_PROMPT_WORKERS: require('../featureFlags').ENABLE_PROMPT_WORKERS
+      }
     });
   });
 };
