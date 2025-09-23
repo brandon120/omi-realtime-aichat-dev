@@ -383,9 +383,10 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     req.app._router.handle(Object.assign(req, { method: 'PATCH' }), res, () => {});
   }));
   
-  // GET /memories - Get user memories
+  // GET /memories - Get user memories (supports both cursor and offset pagination)
   app.get('/memories', requireAuth, asyncHandler(async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+    const cursor = req.query.cursor ? new Date(String(req.query.cursor)) : null;
     const offset = parseInt(req.query.offset) || 0;
     const search = req.query.search;
     
@@ -394,6 +395,32 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
       where.text = { contains: search, mode: 'insensitive' };
     }
     
+    // Use cursor-based pagination if cursor is provided OR if no offset (Expo app format)
+    if (cursor || (!cursor && !offset && !req.query.offset)) {
+      const memories = await prisma.memory.findMany({
+        where: cursor ? { AND: [where, { createdAt: { lt: cursor } }] } : where,
+        orderBy: { createdAt: 'desc' },
+        take: limit + 1
+      });
+      
+      const hasMore = memories.length > limit;
+      const page = hasMore ? memories.slice(0, limit) : memories;
+      const nextCursor = hasMore ? page[page.length - 1].createdAt.toISOString() : null;
+      
+      const items = page.map(m => ({
+        id: m.id,
+        text: m.text,
+        createdAt: m.createdAt.toISOString()
+      }));
+      
+      return res.json({
+        ok: true,
+        items,
+        nextCursor
+      });
+    }
+    
+    // Use offset-based pagination (legacy)
     const [memories, total] = await Promise.all([
       prisma.memory.findMany({
         where,
@@ -410,6 +437,174 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
       limit,
       offset,
       hasMore: offset + memories.length < total
+    });
+  }));
+  
+  // POST /memories - Create a memory
+  app.post('/memories', requireAuth, asyncHandler(async (req, res) => {
+    const { text } = req.body;
+    
+    if (!text) {
+      throw new ValidationError('text is required');
+    }
+    
+    const memory = await prisma.memory.create({
+      data: {
+        userId: req.user.id,
+        text: text.trim()
+      }
+    });
+    
+    res.json({
+      ok: true,
+      memory: {
+        id: memory.id,
+        text: memory.text,
+        createdAt: memory.createdAt
+      }
+    });
+  }));
+  
+  // POST /memories/import/omi - Import memories from OMI
+  app.post('/memories/import/omi', requireAuth, asyncHandler(async (req, res) => {
+    // Find verified OMI links for this user
+    const links = await prisma.omiUserLink.findMany({
+      where: { 
+        userId: req.user.id, 
+        isVerified: true 
+      },
+      select: { omiUserId: true }
+    });
+    
+    if (!links.length) {
+      return res.status(404).json({ 
+        error: 'No verified OMI link found. Please link your OMI device first.' 
+      });
+    }
+    
+    const pageLimit = Math.min(Number(req.body?.limit) || 1000, 1000);
+    const maxTotal = Math.max(0, Math.min(Number(req.body?.max_total) || 0, 100000));
+    
+    let processed = 0;
+    let imported = 0;
+    let skipped = 0;
+    
+    // Helper function to call OMI API
+    async function omiReadMemories({ uid, limit, offset }) {
+      const axios = require('axios');
+      const appId = config.getValue('omi.appId');
+      const appSecret = config.getValue('omi.appSecret');
+      
+      if (!appId || !appSecret) {
+        throw new Error('OMI API credentials not configured');
+      }
+      
+      try {
+        const response = await axios.get(`https://api.omi.me/memories`, {
+          params: { uid, limit, offset },
+          headers: {
+            'X-App-Id': appId,
+            'X-App-Secret': appSecret
+          }
+        });
+        return response.data;
+      } catch (error) {
+        throw new Error(error.response?.data?.error || 'Failed to read memories from OMI');
+      }
+    }
+    
+    // Process each linked OMI device
+    for (const link of links) {
+      let offset = 0;
+      let safetyCounter = 0;
+      let done = false;
+      
+      // Paginate until fewer than pageLimit returned or safety cap reached
+      while (safetyCounter < 100) {
+        safetyCounter++;
+        let result;
+        
+        try {
+          result = await omiReadMemories({ 
+            uid: link.omiUserId, 
+            limit: pageLimit, 
+            offset 
+          });
+        } catch (e) {
+          logger.error('OMI memory import failed', {
+            userId: req.user.id,
+            omiUserId: link.omiUserId,
+            error: e.message
+          });
+          return res.status(400).json({ 
+            error: `OMI read failed: ${e.message}` 
+          });
+        }
+        
+        const items = (result && (result.memories || result.items)) || [];
+        if (!items.length) break;
+        
+        for (const m of items) {
+          if (maxTotal > 0 && processed >= maxTotal) {
+            done = true;
+            break;
+          }
+          processed++;
+          
+          try {
+            const text = String(m?.content ?? m?.text ?? '').trim();
+            if (!text) {
+              skipped++;
+              continue;
+            }
+            
+            // Deduplicate on exact text per user
+            const dupe = await prisma.memory.findFirst({
+              where: { userId: req.user.id, text }
+            });
+            
+            if (dupe) {
+              skipped++;
+              continue;
+            }
+            
+            const createdAt = m?.created_at ? new Date(String(m.created_at)) : undefined;
+            await prisma.memory.create({
+              data: {
+                userId: req.user.id,
+                text,
+                ...(createdAt ? { createdAt } : {})
+              }
+            });
+            imported++;
+          } catch (error) {
+            logger.debug('Failed to import memory', {
+              error: error.message,
+              memory: m
+            });
+            skipped++;
+          }
+        }
+        
+        if (done) break;
+        if (items.length < pageLimit) break;
+        offset += items.length;
+      }
+      
+      if (done) break;
+    }
+    
+    logger.info('OMI memories imported', {
+      userId: req.user.id,
+      imported,
+      skipped,
+      processed
+    });
+    
+    res.json({ 
+      ok: true, 
+      imported, 
+      skipped 
     });
   }));
   
