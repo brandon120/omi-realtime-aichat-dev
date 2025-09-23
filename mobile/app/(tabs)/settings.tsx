@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { StyleSheet, View, Text, Button, TextInput, Alert, ScrollView, TouchableOpacity, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ThemedView, ThemedText } from '@/components/Themed';
-import { apiMe, apiStartOmiLink, apiConfirmOmiLink, apiGetPreferences, apiUpdatePreferences, type Preferences } from '@/lib/api';
+import { apiMe, apiStartOmiLink, apiConfirmOmiLink, apiSyncOmiConversations, apiGetPreferences, apiUpdatePreferences, type Preferences } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 
 export default function SettingsScreen() {
@@ -45,6 +45,19 @@ export default function SettingsScreen() {
       }
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Failed to confirm');
+    }
+  }
+
+  async function syncConversations() {
+    try {
+      const result = await apiSyncOmiConversations();
+      if (result?.ok) {
+        Alert.alert('Sync Complete', result.message || 'Conversations synced successfully');
+      } else {
+        Alert.alert('Sync Failed', 'Could not sync conversations');
+      }
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to sync conversations');
     }
   }
 
@@ -95,6 +108,16 @@ export default function SettingsScreen() {
           </View>
           <View style={[styles.rowButtons, isSmall && { gap: 6 }]}>
             <TouchableOpacity style={styles.successBtn} onPress={confirmLink}><Text style={styles.btnText}>Confirm Code</Text></TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Sync Conversations</Text>
+          <Text style={{ color: '#666', marginBottom: 8 }}>
+            If your OMI conversations aren't showing up in the mobile app, use this to sync them.
+          </Text>
+          <View style={[styles.rowButtons, isSmall && { gap: 6 }]}>
+            <TouchableOpacity style={styles.primaryBtn} onPress={syncConversations}><Text style={styles.btnText}>Sync Now</Text></TouchableOpacity>
           </View>
         </View>
 

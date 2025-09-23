@@ -1636,6 +1636,70 @@ if (ENABLE_USER_SYSTEM) {
         console.warn('Failed to upsert/attach OmiSession on confirm:', attachErr?.message || attachErr);
       }
 
+      // Retroactively link existing OMI conversations to this user
+      try {
+        const omiSessions = await prisma.omiSession.findMany({
+          where: { omiSessionId: { contains: omiUserId } },
+          include: { conversations: true }
+        });
+        
+        for (const session of omiSessions) {
+          // Update the session to link to the user
+          await prisma.omiSession.update({
+            where: { id: session.id },
+            data: { userId: req.user.id }
+          });
+          
+          // Link conversations to the user and add to context windows
+          for (const conversation of session.conversations) {
+            if (!conversation.userId) {
+              await prisma.conversation.update({
+                where: { id: conversation.id },
+                data: { userId: req.user.id }
+              });
+              
+              // Add to context window if not already present
+              const existingWindow = await prisma.userContextWindow.findFirst({
+                where: { userId: req.user.id, conversationId: conversation.id }
+              });
+              
+              if (!existingWindow) {
+                // Find an available slot or use slot 1
+                const slot1Window = await prisma.userContextWindow.findUnique({
+                  where: { userId_slot: { userId: req.user.id, slot: 1 } }
+                });
+                
+                if (!slot1Window) {
+                  await prisma.userContextWindow.create({
+                    data: { userId: req.user.id, slot: 1, conversationId: conversation.id, isActive: true }
+                  });
+                } else {
+                  // Find next available slot
+                  let slot = 2;
+                  while (slot <= 5) {
+                    const existing = await prisma.userContextWindow.findUnique({
+                      where: { userId_slot: { userId: req.user.id, slot } }
+                    });
+                    if (!existing) break;
+                    slot++;
+                  }
+                  
+                  if (slot <= 5) {
+                    await prisma.userContextWindow.create({
+                      data: { userId: req.user.id, slot, conversationId: conversation.id, isActive: false }
+                    });
+                  }
+                }
+              }
+            }
+          }
+        }
+        
+        console.log(`Linked ${omiSessions.length} OMI sessions and their conversations to user ${req.user.id}`);
+      } catch (linkError) {
+        console.warn('Failed to retroactively link OMI conversations:', linkError?.message || linkError);
+      }
+
       res.status(200).json({ ok: true });
     } catch (e) {
       console.error('Link confirm error:', e);
@@ -1708,6 +1772,95 @@ if (ENABLE_USER_SYSTEM) {
     } catch (e) {
       console.error('Link unlink error:', e);
       res.status(500).json({ error: 'Failed to unlink OMI account' });
+    }
+  });
+
+  // Sync OMI conversations to context windows (utility endpoint)
+  app.post('/link/omi/sync-conversations', requireAuth, async (req, res) => {
+    try {
+      if (!prisma) return res.status(503).json({ error: 'User system disabled' });
+      
+      const links = await prisma.omiUserLink.findMany({
+        where: { userId: req.user.id, isVerified: true },
+        select: { omiUserId: true }
+      });
+      
+      if (!links.length) {
+        return res.status(404).json({ error: 'No verified OMI links found' });
+      }
+      
+      let totalLinked = 0;
+      let totalConversations = 0;
+      
+      for (const link of links) {
+        const omiSessions = await prisma.omiSession.findMany({
+          where: { omiSessionId: { contains: link.omiUserId } },
+          include: { conversations: true }
+        });
+        
+        for (const session of omiSessions) {
+          // Update the session to link to the user
+          await prisma.omiSession.update({
+            where: { id: session.id },
+            data: { userId: req.user.id }
+          });
+          
+          // Link conversations to the user and add to context windows
+          for (const conversation of session.conversations) {
+            if (!conversation.userId) {
+              await prisma.conversation.update({
+                where: { id: conversation.id },
+                data: { userId: req.user.id }
+              });
+              totalConversations++;
+              
+              // Add to context window if not already present
+              const existingWindow = await prisma.userContextWindow.findFirst({
+                where: { userId: req.user.id, conversationId: conversation.id }
+              });
+              
+              if (!existingWindow) {
+                // Find an available slot or use slot 1
+                const slot1Window = await prisma.userContextWindow.findUnique({
+                  where: { userId_slot: { userId: req.user.id, slot: 1 } }
+                });
+                
+                if (!slot1Window) {
+                  await prisma.userContextWindow.create({
+                    data: { userId: req.user.id, slot: 1, conversationId: conversation.id, isActive: true }
+                  });
+                  totalLinked++;
+                } else {
+                  // Find next available slot
+                  let slot = 2;
+                  while (slot <= 5) {
+                    const existing = await prisma.userContextWindow.findUnique({
+                      where: { userId_slot: { userId: req.user.id, slot } }
+                    });
+                    if (!existing) break;
+                    slot++;
+                  }
+                  
+                  if (slot <= 5) {
+                    await prisma.userContextWindow.create({
+                      data: { userId: req.user.id, slot, conversationId: conversation.id, isActive: false }
+                    });
+                    totalLinked++;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      
+      res.status(200).json({ 
+        ok: true, 
+        message: `Synced ${totalLinked} conversations to context windows from ${totalConversations} total OMI conversations` 
+      });
+    } catch (e) {
+      console.error('Sync conversations error:', e);
+      res.status(500).json({ error: 'Failed to sync OMI conversations' });
     }
   });
 }
@@ -1835,6 +1988,71 @@ if (!ENABLE_NEW_OMI_ROUTES) app.post('/omi-webhook', async (req, res) => {
                 } catch (attachErr) {
                   console.error('Background OTP attach session failed:', attachErr);
                 }
+                
+                // Retroactively link existing OMI conversations to this user
+                try {
+                  const omiSessions = await prisma.omiSession.findMany({
+                    where: { omiSessionId: { contains: link.omiUserId } },
+                    include: { conversations: true }
+                  });
+                  
+                  for (const session of omiSessions) {
+                    // Update the session to link to the user
+                    await prisma.omiSession.update({
+                      where: { id: session.id },
+                      data: { userId: link.userId }
+                    });
+                    
+                    // Link conversations to the user and add to context windows
+                    for (const conversation of session.conversations) {
+                      if (!conversation.userId) {
+                        await prisma.conversation.update({
+                          where: { id: conversation.id },
+                          data: { userId: link.userId }
+                        });
+                        
+                        // Add to context window if not already present
+                        const existingWindow = await prisma.userContextWindow.findFirst({
+                          where: { userId: link.userId, conversationId: conversation.id }
+                        });
+                        
+                        if (!existingWindow) {
+                          // Find an available slot or use slot 1
+                          const slot1Window = await prisma.userContextWindow.findUnique({
+                            where: { userId_slot: { userId: link.userId, slot: 1 } }
+                          });
+                          
+                          if (!slot1Window) {
+                            await prisma.userContextWindow.create({
+                              data: { userId: link.userId, slot: 1, conversationId: conversation.id, isActive: true }
+                            });
+                          } else {
+                            // Find next available slot
+                            let slot = 2;
+                            while (slot <= 5) {
+                              const existing = await prisma.userContextWindow.findUnique({
+                                where: { userId_slot: { userId: link.userId, slot } }
+                              });
+                              if (!existing) break;
+                              slot++;
+                            }
+                            
+                            if (slot <= 5) {
+                              await prisma.userContextWindow.create({
+                                data: { userId: link.userId, slot, conversationId: conversation.id, isActive: false }
+                              });
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                  
+                  console.log(`Voice verification: Linked ${omiSessions.length} OMI sessions and their conversations to user ${link.userId}`);
+                } catch (linkError) {
+                  console.warn('Failed to retroactively link OMI conversations via voice:', linkError?.message || linkError);
+                }
+                
                 sessionTranscripts.delete(session_id);
               } else {
                 try {

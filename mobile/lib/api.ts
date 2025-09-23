@@ -203,6 +203,15 @@ export async function apiConfirmOmiLink(omi_user_id: string, code: string): Prom
   return !!(data && data.ok);
 }
 
+export async function apiSyncOmiConversations(): Promise<{ ok: boolean; message?: string } | null> {
+  const client = createApiClient();
+  try {
+    const { data } = await client.post('/link/omi/sync-conversations', {});
+    if (data && data.ok) return data;
+  } catch {}
+  return null;
+}
+
 // Conversations & Messages
 export type ConversationItem = {
   id: string;
