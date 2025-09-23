@@ -802,21 +802,26 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     // Find the most recent conversation from any source
     let currentConversation = null;
     let sessionId = null;
+    let recentSession = null; // Declare in outer scope
     
     // Method 1: Find conversations directly linked to user
     currentConversation = await prisma.conversation.findFirst({
       where: { userId: req.user.id },
       orderBy: { createdAt: 'desc' },
       include: {
-        omiSession: {
-          select: { omiSessionId: true }
-        }
+        omiSession: true
       }
     });
     
+    // If found through method 1, get session info if available
+    if (currentConversation?.omiSession) {
+      sessionId = currentConversation.omiSession.omiSessionId;
+      recentSession = currentConversation.omiSession;
+    }
+    
     // Method 2: Find conversations from OMI sessions linked to user
     if (!currentConversation) {
-      const recentSession = await prisma.omiSession.findFirst({
+      recentSession = await prisma.omiSession.findFirst({
         where: { userId: req.user.id },
         orderBy: { lastSeenAt: 'desc' },
         include: {
@@ -848,24 +853,31 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
         },
         orderBy: { createdAt: 'desc' },
         include: {
-          omiSession: {
-            select: { omiSessionId: true }
-          }
+          omiSession: true
         }
       });
       
       if (recentConversation) {
         currentConversation = recentConversation;
         sessionId = recentConversation.omiSession?.omiSessionId;
+        recentSession = recentConversation.omiSession;
       }
     }
     
     if (!currentConversation) {
-      // No conversation found, return empty
+      // No conversation found, but try to get session info if we don't have it
+      if (!recentSession) {
+        recentSession = await prisma.omiSession.findFirst({
+          where: { userId: req.user.id },
+          orderBy: { lastSeenAt: 'desc' }
+        });
+      }
+      
+      // Return empty conversation
       return res.json({
         ok: true,
         conversation: null,
-        sessionId: recentSession?.omiSessionId || null
+        sessionId: recentSession?.omiSessionId || sessionId || null
       });
     }
     
@@ -893,7 +905,7 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
         source: msg.source,
         createdAt: msg.createdAt.toISOString()
       })),
-      sessionId: recentSession?.omiSessionId || null
+      sessionId: recentSession?.omiSessionId || sessionId || null
     });
   }));
   

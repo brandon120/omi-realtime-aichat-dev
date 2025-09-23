@@ -331,6 +331,23 @@ class AppInitializer {
         config
       });
       logger.info('User routes initialized');
+    } else {
+      // Create stub endpoints when no database
+      app.get('/conversations/current', (req, res) => {
+        res.status(503).json({
+          error: 'Database required',
+          message: 'Please configure DATABASE_URL to enable conversations'
+        });
+      });
+      
+      app.post('/sessions/link', (req, res) => {
+        res.status(503).json({
+          error: 'Database required',
+          message: 'Please configure DATABASE_URL to enable session linking'
+        });
+      });
+      
+      logger.info('User route stubs created (no database)');
     }
     
     // Setup windows and linking routes (can work with or without database)
