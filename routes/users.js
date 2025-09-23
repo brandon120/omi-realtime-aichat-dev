@@ -633,6 +633,185 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
     res.json({ message: 'Memory deleted successfully' });
   }));
   
+  // GET /conversations/current/stream - Server-Sent Events for live chat updates
+  app.get('/conversations/current/stream', asyncHandler(async (req, res) => {
+    // Handle auth from query param for EventSource compatibility
+    const sid = req.query.sid || req.cookies.sid;
+    if (!sid) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    
+    // Verify session
+    const session = await prisma.authSession.findUnique({
+      where: { sessionToken: sid },
+      include: { user: true }
+    });
+    
+    if (!session || session.expiresAt < new Date()) {
+      return res.status(401).json({ error: 'Invalid or expired session' });
+    }
+    
+    const userId = session.userId;
+    // Set up SSE headers
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no' // Disable Nginx buffering
+    });
+    
+    // Send initial connection message
+    res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
+    
+    let lastMessageId = null;
+    let currentConversationId = null;
+    
+    // Function to check for updates
+    const checkForUpdates = async () => {
+      try {
+        // Find the most recent OMI session for this user
+        const recentSession = await prisma.omiSession.findFirst({
+          where: { userId: userId },
+          orderBy: { lastSeenAt: 'desc' },
+          include: {
+            conversations: {
+              orderBy: { createdAt: 'desc' },
+              take: 1
+            }
+          }
+        });
+        
+        const conversation = recentSession?.conversations?.[0];
+        
+        if (conversation) {
+          // Check if conversation changed
+          if (currentConversationId !== conversation.id) {
+            currentConversationId = conversation.id;
+            res.write(`data: ${JSON.stringify({ 
+              type: 'conversation_changed', 
+              conversationId: conversation.id 
+            })}\n\n`);
+          }
+          
+          // Get latest messages
+          const messages = await prisma.message.findMany({
+            where: { conversationId: conversation.id },
+            orderBy: { createdAt: 'desc' },
+            take: 5
+          });
+          
+          if (messages.length > 0 && messages[0].id !== lastMessageId) {
+            // New messages detected
+            const newMessages = [];
+            for (const msg of messages) {
+              if (msg.id === lastMessageId) break;
+              newMessages.push({
+                id: msg.id,
+                role: msg.role,
+                text: msg.text,
+                source: msg.source,
+                createdAt: msg.createdAt.toISOString()
+              });
+            }
+            
+            if (newMessages.length > 0) {
+              lastMessageId = messages[0].id;
+              res.write(`data: ${JSON.stringify({ 
+                type: 'new_messages', 
+                messages: newMessages.reverse() 
+              })}\n\n`);
+            }
+          }
+        }
+      } catch (error) {
+        logger.error('SSE update check failed', { error: error.message });
+      }
+    };
+    
+    // Check for updates every 2 seconds
+    const interval = setInterval(checkForUpdates, 2000);
+    
+    // Initial check
+    checkForUpdates();
+    
+    // Clean up on client disconnect
+    req.on('close', () => {
+      clearInterval(interval);
+      logger.debug('SSE connection closed', { userId: userId });
+    });
+  }));
+  
+  // GET /conversations/current - Get the current active conversation
+  app.get('/conversations/current', requireAuth, asyncHandler(async (req, res) => {
+    // Find the most recent OMI session for this user
+    const recentSession = await prisma.omiSession.findFirst({
+      where: { userId: req.user.id },
+      orderBy: { lastSeenAt: 'desc' },
+      include: {
+        conversations: {
+          orderBy: { createdAt: 'desc' },
+          take: 1
+        }
+      }
+    });
+    
+    // If no session or conversation, check for any recent conversation
+    let currentConversation = recentSession?.conversations?.[0];
+    
+    if (!currentConversation) {
+      currentConversation = await prisma.conversation.findFirst({
+        where: {
+          OR: [
+            { userId: req.user.id },
+            { omiSession: { userId: req.user.id } }
+          ]
+        },
+        orderBy: { createdAt: 'desc' },
+        include: {
+          omiSession: {
+            select: { omiSessionId: true }
+          }
+        }
+      });
+    }
+    
+    if (!currentConversation) {
+      // No conversation found, return empty
+      return res.json({
+        ok: true,
+        conversation: null,
+        sessionId: recentSession?.omiSessionId || null
+      });
+    }
+    
+    // Get recent messages for this conversation
+    const messages = await prisma.message.findMany({
+      where: { conversationId: currentConversation.id },
+      orderBy: { createdAt: 'desc' },
+      take: 20
+    });
+    
+    res.json({
+      ok: true,
+      conversation: {
+        id: currentConversation.id,
+        title: currentConversation.title,
+        summary: currentConversation.summary,
+        createdAt: currentConversation.createdAt.toISOString(),
+        openaiConversationId: currentConversation.openaiConversationId || null,
+        omiSessionKey: currentConversation.omiSession?.omiSessionId || recentSession?.omiSessionId || null
+      },
+      messages: messages.reverse().map(msg => ({
+        id: msg.id,
+        role: msg.role,
+        text: msg.text,
+        source: msg.source,
+        createdAt: msg.createdAt.toISOString()
+      })),
+      sessionId: recentSession?.omiSessionId || null
+    });
+  }));
+  
   // GET /conversations - Get user conversations (Expo app format with cursor)
   app.get('/conversations', requireAuth, asyncHandler(async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit) || 20, 100);
