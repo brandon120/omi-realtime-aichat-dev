@@ -93,6 +93,7 @@ model OmiSession {
   userId               String?  @db.Uuid
   user                 User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
   openaiConversationId String?
+  lastResponseId       String?  // Stores the last OpenAI response ID for conversation continuity
   createdAt            DateTime @default(now())
   lastSeenAt           DateTime @default(now())
 

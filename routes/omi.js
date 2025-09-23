@@ -306,50 +306,77 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
         }
       }
       
-      // Ensure conversation id is stored in OmiSession
+      // Manage conversation state for continuity
       let conversationId = sessionRowCache?.openaiConversationId || null;
+      let previousResponseId = sessionRowCache?.lastResponseId || null;
       
-      // Create conversation if needed (parallel with memory fetch)
-      const conversationPromise = conversationId ? 
-        Promise.resolve(conversationId) : 
-        (async () => {
-          try {
-            // Check if conversations API is available
-            if (openai.beta && openai.beta.conversations) {
+      // Create or retrieve conversation (parallel with memory fetch)
+      const conversationPromise = (async () => {
+        try {
+          // Check if conversations API is available
+          if (openai.beta && openai.beta.conversations) {
+            if (!conversationId) {
+              // Create new conversation
               const conv = await openai.beta.conversations.create({ 
-                metadata: { omi_session_id: String(session_id) } 
+                metadata: { 
+                  omi_session_id: String(session_id),
+                  created_at: new Date().toISOString()
+                } 
               });
               conversationId = conv.id;
-              if (sessionRowCache) sessionRowCache.openaiConversationId = conversationId;
-              return conversationId;
+              if (sessionRowCache) {
+                sessionRowCache.openaiConversationId = conversationId;
+                // Persist to database for future requests
+                if (prisma && sessionRowCache.id) {
+                  prisma.omiSession.update({
+                    where: { id: sessionRowCache.id },
+                    data: { openaiConversationId: conversationId }
+                  }).catch(err => console.warn('Failed to update conversationId:', err.message));
+                }
+              }
+              console.log(`Created new conversation: ${conversationId}`);
             } else {
-              console.log('Conversations API not available, using session-based context');
-              return null;
+              console.log(`Using existing conversation: ${conversationId}`);
             }
-          } catch (err) {
-            console.warn('Failed to create conversation:', err.message);
-            return null;
+            return { conversationId, previousResponseId };
+          } else {
+            console.log('Conversations API not available, using stateless mode');
+            return { conversationId: null, previousResponseId: null };
           }
-        })();
+        } catch (err) {
+          console.warn('Failed to manage conversation:', err.message);
+          return { conversationId: null, previousResponseId: null };
+        }
+      })();
       
       // Wait for parallel operations
-      const [memoryContext, finalConversationId] = await Promise.all([
+      const [memoryContext, conversationState] = await Promise.all([
         memoryContextPromise,
         conversationPromise
       ]);
       
-      if (finalConversationId) conversationId = finalConversationId;
+      if (conversationState) {
+        conversationId = conversationState.conversationId;
+        previousResponseId = conversationState.previousResponseId;
+      }
       
-      // Build system instructions AFTER memoryContext is resolved
-      const sysInstructions = [
-        'You are Omi, a friendly, practical assistant. Keep replies concise.',
-        memoryContext ? `Relevant memories:\n${memoryContext}` : ''
-      ].filter(Boolean).join('\n\n');
+      // Build system instructions with optimized context
+      // Keep instructions concise to save tokens while maintaining context
+      const maxContextTokens = config.getValue('openai.conversationState.maxContextTokens', 500);
+      const baseInstructions = 'You are Omi, a friendly, practical assistant. Keep replies concise.';
+      const contextInstructions = memoryContext ? 
+        `Context: ${memoryContext.slice(0, maxContextTokens)}` : ''; // Limit memory context to save tokens
+      
+      const sysInstructions = [baseInstructions, contextInstructions]
+        .filter(Boolean)
+        .join('\n');
 
       // Call OpenAI with timeout to prevent long delays
       let aiResponse = '';
+      let newResponseId = null;
+      const webhookTimeout = config.getValue('openai.conversationState.webhookTimeout', 8000);
       const openaiTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('OpenAI timeout')), 8000) // 8 seconds timeout
+        setTimeout(() => reject(new Error('OpenAI timeout')), webhookTimeout)
       );
       
       const openaiStartTime = Date.now();
@@ -360,19 +387,28 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
         if (openai.beta && openai.beta.responses) {
           console.log(`Calling OpenAI Responses API with model: ${modelToUse}`);
           
-          // Build the request payload for Responses API
+          // Build the request payload for Responses API with conversation state
+          const webhookMaxTokens = config.getValue('openai.conversationState.webhookMaxTokens', 300);
+          const storeResponses = config.getValue('openai.conversationState.storeResponses', true);
+          
           const requestPayload = {
             model: modelToUse,
             input: question,
             instructions: sysInstructions || 'You are Omi, a helpful assistant. Keep replies concise.',
-            max_tokens: 300,
+            max_tokens: webhookMaxTokens,
             temperature: 0.7,
-            store: false // Don't store for privacy
+            store: storeResponses // Store to maintain conversation state
           };
           
-          // Add conversation if available
-          if (conversationId) {
+          // Use conversation state for continuity
+          if (previousResponseId) {
+            // Chain with previous response for context continuity
+            requestPayload.previous_response_id = previousResponseId;
+            console.log(`Chaining with previous response: ${previousResponseId}`);
+          } else if (conversationId) {
+            // Use conversation ID if no previous response
             requestPayload.conversation = conversationId;
+            console.log(`Using conversation: ${conversationId}`);
           }
           
           const response = await Promise.race([
@@ -382,6 +418,19 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
           
           const responseTime = Date.now() - openaiStartTime;
           console.log(`OpenAI Responses API responded in ${responseTime}ms`);
+          
+      // Store the response ID for next interaction
+      newResponseId = response.id;
+      if (sessionRowCache && newResponseId) {
+        sessionRowCache.lastResponseId = newResponseId;
+        // Persist to database for future requests
+        if (prisma && sessionRowCache.id) {
+          prisma.omiSession.update({
+            where: { id: sessionRowCache.id },
+            data: { lastResponseId: newResponseId }
+          }).catch(err => console.warn('Failed to update lastResponseId:', err.message));
+        }
+      }
           
           if (responseTime > 5000) {
             console.warn(`Slow OpenAI response: ${responseTime}ms for model ${modelToUse}`);

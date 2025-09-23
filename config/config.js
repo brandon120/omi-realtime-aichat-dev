@@ -45,13 +45,20 @@ class Config {
       },
       
       // OpenAI Configuration
-      openai: {
-        apiKey: this.getString('OPENAI_API_KEY') || this.getString('OPENAI_KEY', ''),
-        model: this.getString('OPENAI_MODEL', 'gpt-4o-mini'), // Note: gpt-5 models mentioned in docs are not yet available
-        maxTokens: this.getNumber('OPENAI_MAX_TOKENS', 500),
-        temperature: this.getNumber('OPENAI_TEMPERATURE', 0.7),
-        timeout: this.getNumber('OPENAI_TIMEOUT', 20000)
-      },
+    openai: {
+      apiKey: this.getString('OPENAI_API_KEY') || this.getString('OPENAI_KEY', ''),
+      model: this.getString('OPENAI_MODEL', 'gpt-4o-mini'), // Note: gpt-5 models mentioned in docs are not yet available
+      maxTokens: this.getNumber('OPENAI_MAX_TOKENS', 500),
+      temperature: this.getNumber('OPENAI_TEMPERATURE', 0.7),
+      timeout: this.getNumber('OPENAI_TIMEOUT', 20000),
+      conversationState: {
+        enabled: this.getBoolean('OPENAI_CONVERSATION_STATE', true),
+        storeResponses: this.getBoolean('OPENAI_STORE_RESPONSES', true),
+        maxContextTokens: this.getNumber('OPENAI_MAX_CONTEXT_TOKENS', 500),
+        webhookMaxTokens: this.getNumber('OPENAI_WEBHOOK_MAX_TOKENS', 300),
+        webhookTimeout: this.getNumber('OPENAI_WEBHOOK_TIMEOUT', 8000)
+      }
+    },
       
       // OMI Integration
       omi: {
