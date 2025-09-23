@@ -228,6 +228,34 @@ module.exports = function createOmiRoutes({ app, prisma, openai, OPENAI_MODEL, E
             linkedUserId = sessionRowCache.userId;
           }
         }
+        
+        // Create or update OMI session with user linkage
+        if (linkedUserId) {
+          try {
+            const sessionData = await prisma.omiSession.upsert({
+              where: { omiSessionId: String(session_id) },
+              update: { 
+                userId: linkedUserId,
+                lastSeenAt: new Date()
+              },
+              create: {
+                omiSessionId: String(session_id),
+                userId: linkedUserId,
+                lastSeenAt: new Date()
+              },
+              include: { user: true, preferences: true }
+            });
+            sessionRowCache = sessionData;
+            // Update cache
+            const cacheKey = `${session_id}-${linkedUserId}`;
+            sessionCache.set(cacheKey, { 
+              data: { sessionRow: sessionData, linkedUserId }, 
+              timestamp: Date.now() 
+            });
+          } catch (err) {
+            console.warn('Failed to upsert OMI session:', err.message);
+          }
+        }
       }
 
       const { pref, regex } = await loadActivationConfig(session_id, linkedUserId, sessionRowCache);

@@ -743,28 +743,61 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
   
   // GET /conversations/current - Get the current active conversation
   app.get('/conversations/current', requireAuth, asyncHandler(async (req, res) => {
-    // Find the most recent OMI session for this user
-    const recentSession = await prisma.omiSession.findFirst({
+    // First check if user has any linked OMI devices
+    const omiLinks = await prisma.omiUserLink.findMany({
+      where: { 
+        userId: req.user.id,
+        isVerified: true 
+      },
+      select: { omiUserId: true }
+    });
+    
+    // Find the most recent conversation from any source
+    let currentConversation = null;
+    let sessionId = null;
+    
+    // Method 1: Find conversations directly linked to user
+    currentConversation = await prisma.conversation.findFirst({
       where: { userId: req.user.id },
-      orderBy: { lastSeenAt: 'desc' },
+      orderBy: { createdAt: 'desc' },
       include: {
-        conversations: {
-          orderBy: { createdAt: 'desc' },
-          take: 1
+        omiSession: {
+          select: { omiSessionId: true }
         }
       }
     });
     
-    // If no session or conversation, check for any recent conversation
-    let currentConversation = recentSession?.conversations?.[0];
-    
+    // Method 2: Find conversations from OMI sessions linked to user
     if (!currentConversation) {
-      currentConversation = await prisma.conversation.findFirst({
+      const recentSession = await prisma.omiSession.findFirst({
+        where: { userId: req.user.id },
+        orderBy: { lastSeenAt: 'desc' },
+        include: {
+          conversations: {
+            orderBy: { createdAt: 'desc' },
+            take: 1
+          }
+        }
+      });
+      
+      if (recentSession?.conversations?.[0]) {
+        currentConversation = recentSession.conversations[0];
+        sessionId = recentSession.omiSessionId;
+      }
+    }
+    
+    // Method 3: Find conversations from linked OMI devices (via uid)
+    if (!currentConversation && omiLinks.length > 0) {
+      // Look for sessions that might be from linked devices
+      const omiUserIds = omiLinks.map(l => l.omiUserId);
+      
+      // This would require tracking uid in conversations or sessions
+      // For now, we'll look for any recent conversation activity
+      const recentConversation = await prisma.conversation.findFirst({
         where: {
-          OR: [
-            { userId: req.user.id },
-            { omiSession: { userId: req.user.id } }
-          ]
+          omiSession: {
+            userId: req.user.id
+          }
         },
         orderBy: { createdAt: 'desc' },
         include: {
@@ -773,6 +806,11 @@ module.exports = function createUserRoutes({ app, prisma, config }) {
           }
         }
       });
+      
+      if (recentConversation) {
+        currentConversation = recentConversation;
+        sessionId = recentConversation.omiSession?.omiSessionId;
+      }
     }
     
     if (!currentConversation) {
